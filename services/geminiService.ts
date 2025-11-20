@@ -1,6 +1,19 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
 import { InventoryItem } from "../types";
+// @ts-ignore
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Initialize PDF Worker
+try {
+    // @ts-ignore
+    if (typeof pdfjsLib !== 'undefined' && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+         // @ts-ignore
+         pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs`;
+    }
+} catch (e) {
+    console.warn("PDF.js setup failed", e);
+}
 
 const apiKey = process.env.API_KEY || '';
 const ai = new GoogleGenAI({ apiKey });
@@ -40,7 +53,35 @@ const compressImage = (file: File): Promise<string> => {
   });
 };
 
-// Helper: Read PDF as Base64
+// Helper: Convert PDF Page 1 to Image (Fast Upload)
+const convertPdfToImage = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    // @ts-ignore
+    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1); // Get first page
+
+    const scale = 2.0; // High resolution for clear text
+    const viewport = page.getViewport({ scale });
+
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+
+    if (!context) throw new Error("Canvas context failed");
+
+    await page.render({
+        canvasContext: context,
+        viewport: viewport
+    }).promise;
+
+    // Convert to JPEG (Compressed)
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    return dataUrl.split(',')[1];
+};
+
+// Helper: Read PDF as Base64 (Fallback)
 const readPdfAsBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -72,24 +113,32 @@ export const parseInvoiceDocument = async (file: File): Promise<Partial<Inventor
       if (isImage) {
           // Compress images for speed
           base64Data = await compressImage(file);
-          mimeType = 'image/jpeg'; // We convert everything to jpeg in compressImage
-      } else {
-          // PDF handling
-          if (file.size > 10 * 1024 * 1024) {
-              throw new Error("PDF is too large (>10MB). Please compress it or use an image.");
+          mimeType = 'image/jpeg'; 
+      } else if (isPdf) {
+          // Optimize PDF handling
+          // If PDF is > 1MB, it's likely a scan. Convert to image to save 90% bandwidth.
+          // Even for text PDFs, converting to image ensures consistent AI vision processing.
+          try {
+              base64Data = await convertPdfToImage(file);
+              mimeType = 'image/jpeg'; // Sending as image!
+          } catch (e) {
+              console.warn("PDF conversion failed, falling back to raw PDF upload", e);
+              if (file.size > 10 * 1024 * 1024) {
+                throw new Error("PDF is too large (>10MB) and conversion failed.");
+              }
+              base64Data = await readPdfAsBase64(file);
+              mimeType = 'application/pdf';
           }
-          base64Data = await readPdfAsBase64(file);
-          mimeType = 'application/pdf';
       }
   } catch (e) {
       console.error("File preparation failed", e);
-      throw new Error("Failed to prepare file for upload. It might be too large or corrupted.");
+      throw new Error("Failed to prepare file. Please try taking a photo instead.");
   }
 
   const model = "gemini-2.5-flash"; // Flash is fastest
 
   const prompt = `
-    Analyze this ${isImage ? 'image' : 'PDF'} invoice/purchase order. 
+    Analyze this invoice/purchase order. 
     Extract the list of line items purchased. 
     
     IMPORTANT RULES:
