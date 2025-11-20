@@ -28,7 +28,8 @@ export const generateEstimatePDF = (
       doc.setFontSize(80);
       doc.setTextColor(240, 240, 240);
       doc.setFont("helvetica", "bold");
-      doc.withGraphicsState({ opacity: 0.5 } as any, () => {
+      // Cast to any to bypass strict TS check for withGraphicsState
+      (doc as any).withGraphicsState({ opacity: 0.5 } as any, () => {
         doc.text("DRAFT", pageWidth / 2, pageHeight / 2, { align: 'center', angle: 45 });
       });
       doc.setTextColor(0); // Reset
@@ -188,12 +189,12 @@ export const generateEstimatePDF = (
   const grandTotal = subTotal + additionalCharges.packing + additionalCharges.shipping + additionalCharges.adjustment;
 
   // Footer Rows Construction
-  const footRows = [];
+  const footRows: any[] = [];
   
   const addFootRow = (label: string, value: number, isBold: boolean = false) => {
      if (value !== 0) {
         footRows.push([
-            { content: label, colSpan: 7, styles: { halign: 'right', fontStyle: isBold ? 'bold' : 'normal' } }, 
+            { content: label, colSpan: 7, styles: { halign: 'right' as const, fontStyle: isBold ? 'bold' : 'normal' } }, 
             { content: value.toFixed(2), styles: { fontStyle: isBold ? 'bold' : 'normal' } }
         ]);
      }
@@ -201,7 +202,7 @@ export const generateEstimatePDF = (
 
   // Subtotal
   footRows.push([
-      { content: 'Sub Total', colSpan: 7, styles: { halign: 'right' } },
+      { content: 'Sub Total', colSpan: 7, styles: { halign: 'right' as const } },
       { content: subTotal.toFixed(2) }
   ]);
 
@@ -267,7 +268,9 @@ export const generateEstimatePDF = (
         7: { cellWidth: 30, halign: 'right' }
     },
     didDrawPage: (data) => {
-        yPos = data.cursor.y;
+        if (data.cursor) {
+            yPos = data.cursor.y;
+        }
     }
   });
 
