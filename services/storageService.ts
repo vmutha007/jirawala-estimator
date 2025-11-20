@@ -222,10 +222,22 @@ export const subscribeToEstimates = (cb: (items: EstimateRecord[]) => void) => {
 
 export const addInventoryItem = async (item: InventoryItem) => {
     const inventory = getLocalInventory();
-    // Check if update
-    const idx = inventory.findIndex(i => i.id === item.id);
-    if(idx >= 0) inventory[idx] = item;
-    else inventory.push(item);
+    
+    // 1. Try to find by ID (Edit Mode)
+    let idx = inventory.findIndex(i => i.id === item.id);
+    
+    // 2. If not found by ID, check if duplicate name exists (to prevent duplicates and update latest)
+    if (idx === -1 && item.productName) {
+        idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === item.productName.toLowerCase().trim());
+    }
+
+    if(idx >= 0) {
+        // Update existing item, but preserve its ID for reference integrity
+        const originalId = inventory[idx].id;
+        inventory[idx] = { ...item, id: originalId };
+    } else {
+        inventory.push(item);
+    }
     
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     if(inventoryListener) inventoryListener(inventory);
@@ -234,7 +246,22 @@ export const addInventoryItem = async (item: InventoryItem) => {
 
 export const addInventoryBatch = async (items: InventoryItem[]) => {
     const inventory = getLocalInventory();
-    inventory.push(...items);
+    
+    items.forEach(newItem => {
+        if (!newItem.productName) return;
+
+        // Check for duplicates by name
+        const idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === newItem.productName.toLowerCase().trim());
+        
+        if (idx >= 0) {
+            // Replace existing item with latest data, preserving ID
+            const originalId = inventory[idx].id;
+            inventory[idx] = { ...newItem, id: originalId };
+        } else {
+            inventory.push(newItem);
+        }
+    });
+
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     if(inventoryListener) inventoryListener(inventory);
     await syncData();
@@ -272,8 +299,6 @@ export const updateInventoryStock = async (adjustments: {id: string, qtyChange: 
     if (changed) {
         localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
         if (inventoryListener) inventoryListener(inventory);
-        // Note: Not waiting for sync here to make UI snappy, sync happens in background via debouncing usually, 
-        // but here we just fire and forget for now or rely on next sync.
         syncData(); 
     }
 };

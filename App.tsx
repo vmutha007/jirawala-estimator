@@ -48,10 +48,11 @@ import {
   AlertTriangle,
   IndianRupee,
   MessageCircle,
-  Wallet
+  Wallet,
+  Camera
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus } from './types';
-import { parseInvoicePDF } from './services/geminiService';
+import { parseInvoiceDocument } from './services/geminiService';
 import { 
     subscribeToInventory, 
     subscribeToEstimates, 
@@ -103,6 +104,7 @@ function App() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [estimates, setEstimates] = useState<EstimateRecord[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStep, setProcessingStep] = useState('');
   
   // Toast State
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -304,34 +306,39 @@ function App() {
     if (!file) return;
 
     setIsProcessing(true);
-    addToast("Analyzing PDF...", 'info');
+    setProcessingStep("Reading file...");
+    addToast("Analyzing Invoice...", 'info');
+    
     try {
-      const reader = new FileReader();
-      reader.onload = async (evt) => {
-        const base64 = (evt.target?.result as string).split(',')[1];
-        const parsed = await parseInvoicePDF(base64);
-        
-        const newItems: InventoryItem[] = parsed.map(item => ({
-          id: crypto.randomUUID(),
-          productName: item.productName || "Unknown Item",
-          vendor: item.vendor || "Unknown Vendor",
-          date: item.date || new Date().toISOString().split('T')[0],
-          mrp: item.mrp || 0,
-          purchaseDiscountPercent: item.purchaseDiscountPercent || 0,
-          gstPercent: item.gstPercent || 0,
-          landingPrice: item.landingPrice || 0,
-          stock: item.stock || 0,
-          note: ''
-        }));
+      setProcessingStep("AI Extracting data...");
+      const parsed = await parseInvoiceDocument(file);
+      
+      const newItems: InventoryItem[] = parsed.map(item => ({
+        id: crypto.randomUUID(),
+        productName: item.productName || "Unknown Item",
+        vendor: item.vendor || "Unknown Vendor",
+        date: item.date || new Date().toISOString().split('T')[0],
+        mrp: item.mrp || 0,
+        purchaseDiscountPercent: item.purchaseDiscountPercent || 0,
+        gstPercent: item.gstPercent || 0,
+        landingPrice: item.landingPrice || 0,
+        stock: item.stock || 0,
+        note: ''
+      }));
 
-        await addInventoryBatch(newItems);
-        setIsProcessing(false);
-        addToast(`Successfully added ${newItems.length} items to stock!`, 'success');
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
-      addToast("Failed to parse PDF. Please try a clearer file.", 'error');
+      await addInventoryBatch(newItems);
       setIsProcessing(false);
+      setProcessingStep("");
+      addToast(`Success! Added ${newItems.length} items.`, 'success');
+    } catch (error: any) {
+      console.error(error);
+      let msg = "Failed to analyze file.";
+      if (error.message.includes("API Key")) msg = "System Error: API Key Missing in Build.";
+      if (error.message.includes("too large")) msg = "File too large. Try a photo or smaller PDF.";
+      
+      addToast(msg, 'error');
+      setIsProcessing(false);
+      setProcessingStep("");
     }
   };
 
@@ -1057,19 +1064,31 @@ function App() {
                         <div className="flex justify-between items-start mb-4">
                             <div>
                                 <h2 className="text-lg font-bold text-slate-800">Inventory Actions</h2>
-                                <p className="text-slate-500 text-sm">Add via PDF or Manually</p>
+                                <p className="text-slate-500 text-sm">Add items via PDF invoice or Photo</p>
                             </div>
-                            <div className={`px-3 py-1 rounded-full text-xs font-medium ${isProcessing ? 'bg-amber-100 text-amber-700 animate-pulse' : 'bg-slate-100 text-slate-600'}`}>
-                                {isProcessing ? 'Analyzing Invoice...' : 'Ready'}
+                            <div className={`px-3 py-1 rounded-full text-xs font-medium transition-all ${isProcessing ? 'bg-amber-100 text-amber-700 animate-pulse' : 'bg-slate-100 text-slate-600'}`}>
+                                {isProcessing ? processingStep || 'Processing...' : 'Ready'}
                             </div>
                         </div>
                         <div className="flex flex-col sm:flex-row gap-4">
                             <label className={`flex-1 flex flex-col items-center justify-center h-32 border-2 border-dashed border-slate-300 rounded-lg hover:border-primary hover:bg-slate-50 transition-all cursor-pointer group ${isProcessing ? 'opacity-50 pointer-events-none' : ''}`}>
-                                <input type="file" className="hidden" accept="application/pdf" onChange={handleFileUpload} disabled={isProcessing} />
-                                <Upload className="w-6 h-6 text-slate-400 group-hover:text-primary mb-2" />
-                                <span className="text-sm text-slate-500 font-medium">Upload Invoice PDF</span>
+                                <input type="file" className="hidden" accept="application/pdf, image/*" onChange={handleFileUpload} disabled={isProcessing} />
+                                {isProcessing ? (
+                                    <div className="flex flex-col items-center text-amber-500">
+                                        <RefreshCw className="w-8 h-8 animate-spin mb-2" />
+                                        <span className="text-sm font-bold">{processingStep}</span>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <div className="flex gap-3 mb-2">
+                                            <Upload className="w-6 h-6 text-slate-400 group-hover:text-primary" />
+                                            <Camera className="w-6 h-6 text-slate-400 group-hover:text-primary" />
+                                        </div>
+                                        <span className="text-sm text-slate-500 font-medium text-center">Upload Invoice<br/><span className="text-xs text-slate-400">(PDF or Photo)</span></span>
+                                    </>
+                                )}
                             </label>
-                            <button onClick={openAddModal} className="flex-1 flex flex-col items-center justify-center h-32 border-2 border-dashed border-slate-300 rounded-lg hover:border-primary hover:bg-slate-50 transition-all cursor-pointer group">
+                            <button onClick={openAddModal} disabled={isProcessing} className="flex-1 flex flex-col items-center justify-center h-32 border-2 border-dashed border-slate-300 rounded-lg hover:border-primary hover:bg-slate-50 transition-all cursor-pointer group disabled:opacity-50">
                                 <Plus className="w-6 h-6 text-slate-400 group-hover:text-primary mb-2" />
                                 <span className="text-sm text-slate-500 font-medium">Add Item Manually</span>
                             </button>
