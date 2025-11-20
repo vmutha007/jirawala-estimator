@@ -38,9 +38,8 @@ const compressImage = (file: File): Promise<string> => {
         }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         
-        // Convert to JPEG at 70% quality
-        // This reduces a 5MB photo to ~200KB
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+        // Convert to JPEG at 60% quality for speed
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
         resolve(dataUrl.split(',')[1]);
       };
       img.onerror = (error) => reject(error);
@@ -57,7 +56,12 @@ const convertPdfToImage = async (file: File): Promise<string> => {
     const pdf = await loadingTask.promise;
     const page = await pdf.getPage(1); // Get first page
 
-    const scale = 2.0; // High resolution for clear text
+    // OPTIMIZATION: 
+    // Calculate exact scale for 1024px width. 
+    // Previously we used scale=2.0 which created massive images (e.g. 4000px wide) causing slowness.
+    const desiredWidth = 1024;
+    const viewportRaw = page.getViewport({ scale: 1.0 });
+    const scale = desiredWidth / viewportRaw.width;
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement('canvas');
@@ -72,8 +76,9 @@ const convertPdfToImage = async (file: File): Promise<string> => {
         viewport: viewport
     }).promise;
 
-    // Convert to JPEG (Compressed)
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+    // Convert to JPEG at 60% quality
+    // Resulting image is ~100-150KB instead of 5MB+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
     return dataUrl.split(',')[1];
 };
 

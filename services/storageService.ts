@@ -143,6 +143,12 @@ export const syncData = async () => {
             headers: { 'Authorization': config.accessToken }
         });
 
+        // --- CRITICAL FIX: Check if response is HTML (User entered Wrong URL) ---
+        const contentType = response.headers.get("content-type");
+        if (contentType && contentType.includes("text/html")) {
+            throw new Error("Incorrect URL: You entered the App URL instead of the Sync Worker URL.");
+        }
+
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -172,10 +178,14 @@ export const syncData = async () => {
         console.error("Sync failed", error);
         const msg = error instanceof Error ? error.message : "Unknown";
         let displayMsg = msg;
+        
         if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed (Check URL)";
         if (msg.includes("JSON")) displayMsg = "Invalid Server Response";
         if (msg.includes("HTTP 500")) displayMsg = "Worker Error (Check Binding)";
         
+        // Pass through specific custom errors
+        if (msg.includes("Incorrect URL")) displayMsg = msg;
+
         notifyStatus('error', displayMsg);
     }
 };
@@ -192,6 +202,12 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
         },
         body: JSON.stringify(payload)
     });
+
+    // Check for HTML error pages
+    const contentType = response.headers.get("content-type");
+    if (contentType && contentType.includes("text/html")) {
+        throw new Error("Incorrect URL: You entered the App URL instead of the Sync Worker URL.");
+    }
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
