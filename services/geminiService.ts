@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { InventoryItem } from "../types";
 // @ts-ignore
@@ -14,7 +15,8 @@ try {
     console.warn("PDF.js setup failed", e);
 }
 
-// Helper: Compress Image to reduce payload size (Critical for mobile speed)
+// Helper: Compress Image
+// Updated: Increased MAX_WIDTH and Quality for better OCR accuracy
 const compressImage = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -24,11 +26,18 @@ const compressImage = (file: File): Promise<string> => {
       img.src = event.target?.result as string;
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        // Resize to max width 1024px - perfect for AI reading, small for upload
-        const MAX_WIDTH = 1024; 
-        const scaleSize = MAX_WIDTH / img.width;
-        canvas.width = MAX_WIDTH;
-        canvas.height = img.height * scaleSize;
+        // High resolution for accuracy (2500px width covers most full-page docs well)
+        const MAX_WIDTH = 2500; 
+        let width = img.width;
+        let height = img.height;
+
+        if (width > MAX_WIDTH) {
+          height = height * (MAX_WIDTH / width);
+          width = MAX_WIDTH;
+        }
+        
+        canvas.width = width;
+        canvas.height = height;
         
         const ctx = canvas.getContext('2d');
         if (!ctx) {
@@ -38,8 +47,8 @@ const compressImage = (file: File): Promise<string> => {
         }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         
-        // Convert to JPEG at 60% quality for speed
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+        // High quality JPEG (0.85) to prevent artifacts affecting numbers
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
         resolve(dataUrl.split(',')[1]);
       };
       img.onerror = (error) => reject(error);
@@ -48,7 +57,8 @@ const compressImage = (file: File): Promise<string> => {
   });
 };
 
-// Helper: Convert PDF Page 1 to Image (Fast Upload)
+// Helper: Convert PDF Page 1 to Image
+// Updated: Uses higher scale for clarity
 const convertPdfToImage = async (file: File): Promise<string> => {
     const arrayBuffer = await file.arrayBuffer();
     // @ts-ignore
@@ -56,10 +66,8 @@ const convertPdfToImage = async (file: File): Promise<string> => {
     const pdf = await loadingTask.promise;
     const page = await pdf.getPage(1); // Get first page
 
-    // OPTIMIZATION: 
-    // Calculate exact scale for 1024px width. 
-    // Previously we used scale=2.0 which created massive images (e.g. 4000px wide) causing slowness.
-    const desiredWidth = 1024;
+    // Calculate scale for 2500px width (High fidelity)
+    const desiredWidth = 2500;
     const viewportRaw = page.getViewport({ scale: 1.0 });
     const scale = desiredWidth / viewportRaw.width;
     const viewport = page.getViewport({ scale });
@@ -76,13 +84,12 @@ const convertPdfToImage = async (file: File): Promise<string> => {
         viewport: viewport
     }).promise;
 
-    // Convert to JPEG at 60% quality
-    // Resulting image is ~100-150KB instead of 5MB+
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+    // 0.9 Quality for very clear text
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     return dataUrl.split(',')[1];
 };
 
-// Helper: Read PDF as Base64 (Fallback)
+// Helper: Read PDF as Base64
 const readPdfAsBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -117,23 +124,31 @@ export const parseInvoiceDocument = async (file: File): Promise<Partial<Inventor
 
   try {
       if (isImage) {
-          // Compress images for speed
+          // Compress images slightly but keep high res
           base64Data = await compressImage(file);
           mimeType = 'image/jpeg'; 
       } else if (isPdf) {
-          // Optimize PDF handling
-          // If PDF is > 1MB, it's likely a scan. Convert to image to save 90% bandwidth.
-          // Even for text PDFs, converting to image ensures consistent AI vision processing.
-          try {
-              base64Data = await convertPdfToImage(file);
-              mimeType = 'image/jpeg'; // Sending as image!
-          } catch (e) {
-              console.warn("PDF conversion failed, falling back to raw PDF upload", e);
-              if (file.size > 10 * 1024 * 1024) {
-                throw new Error("PDF is too large (>10MB) and conversion failed.");
-              }
+          // ACCURACY FIX:
+          // Prefer sending the RAW PDF bytes if the file is reasonably sized (< 6MB).
+          // This allows the AI to access the text layer directly (100% accurate) rather than relying on OCR (Vision).
+          if (file.size < 6 * 1024 * 1024) {
+              console.log("Uploading raw PDF for maximum accuracy");
               base64Data = await readPdfAsBase64(file);
               mimeType = 'application/pdf';
+          } else {
+              // Only convert to image if file is huge, but use High Res now.
+              console.log("PDF large, converting to High-Res Image");
+              try {
+                  base64Data = await convertPdfToImage(file);
+                  mimeType = 'image/jpeg'; 
+              } catch (e) {
+                  console.warn("PDF conversion failed, falling back to raw PDF", e);
+                  if (file.size > 10 * 1024 * 1024) {
+                    throw new Error("PDF is too large (>10MB) and conversion failed.");
+                  }
+                  base64Data = await readPdfAsBase64(file);
+                  mimeType = 'application/pdf';
+              }
           }
       }
   } catch (e) {
@@ -141,27 +156,32 @@ export const parseInvoiceDocument = async (file: File): Promise<Partial<Inventor
       throw new Error("Failed to prepare file. Please try taking a photo instead.");
   }
 
-  const model = "gemini-2.5-flash"; // Flash is fastest
+  const model = "gemini-2.5-flash"; 
 
   const prompt = `
-    Analyze this invoice/purchase order. 
-    Extract the list of line items purchased. 
+    You are an expert data extraction assistant for inventory management.
+    Analyze this invoice or purchase order document accurately.
     
-    IMPORTANT RULES:
-    - If the invoice has multiple quantities for an item, extract the UNIT price, not the total line amount.
-    - Look for "HSN/SAC" code if available, put it in the product name or notes.
+    EXTRACT the list of line items purchased.
     
-    For each item, extract:
-    - Product Name: Full description.
-    - Vendor Name: Sender/Supplier name from header.
-    - Date: Invoice Date (YYYY-MM-DD).
-    - MRP: Maximum Retail Price per unit. If not listed, check if there is a "Rate" column that seems higher than the Net Rate. If MRP is unknown, set to 0.
-    - Purchase Discount Percentage: The discount % given by vendor to buyer on this invoice.
-    - GST Percentage: The tax rate (e.g., 18, 12, 28, 5). Look for CGST+SGST or IGST columns.
-    - Landing Price: The final effective BASIC UNIT COST to the buyer (After discount, BEFORE tax). If the invoice lists a "Net Rate" or "Basic Rate", use that. 
-    - Quantity: The number of units purchased. Default to 1 if not specified.
+    CRITICAL RULES FOR ACCURACY:
+    1. **Unit Price / Landing Price**: Find the 'Rate', 'Unit Cost', or 'Basic' column. Do NOT use the 'Amount' or 'Total' column which is (Rate * Qty). We need the price of ONE unit.
+    2. **MRP**: Look for an 'MRP' column. If it does not exist, check if the 'Rate' is significantly higher than the 'Net Rate'. If no MRP is clearly listed, return 0. DO NOT GUESS.
+    3. **Discount**: Look for 'Disc %' or 'Discount'. If listed as an amount, calculate the percentage based on the rate.
+    4. **GST**: Look for 'GST %', 'IGST', 'CGST', 'SGST'. If multiple columns exist (e.g. CGST 9% + SGST 9%), sum them (18%).
+    5. **Product Name**: Capture the full description, including size, dimensions (e.g. 18mm, 8x4), and brand if available.
+    
+    For each item, return a JSON object with:
+    - productName: Full string description.
+    - vendor: The supplier name at the top of the invoice.
+    - date: Invoice Date (YYYY-MM-DD).
+    - mrp: Maximum Retail Price (0 if not found).
+    - purchaseDiscountPercent: The discount percentage (0 if none).
+    - gstPercent: The total tax rate (e.g. 18).
+    - landingPrice: The BASIC UNIT RATE after discount but BEFORE tax. (Net Rate).
+    - quantity: The quantity purchased.
 
-    Return a clean JSON array.
+    Return ONLY a valid JSON array.
   `;
 
   try {
@@ -193,8 +213,8 @@ export const parseInvoiceDocument = async (file: File): Promise<Partial<Inventor
               mrp: { type: Type.NUMBER },
               purchaseDiscountPercent: { type: Type.NUMBER },
               gstPercent: { type: Type.NUMBER },
-              landingPrice: { type: Type.NUMBER, description: "Unit basic cost after discount" },
-              quantity: { type: Type.NUMBER, description: "Quantity purchased" }
+              landingPrice: { type: Type.NUMBER, description: "Basic Unit Rate (After Disc, Before Tax)" },
+              quantity: { type: Type.NUMBER }
             }
           }
         }
@@ -203,10 +223,9 @@ export const parseInvoiceDocument = async (file: File): Promise<Partial<Inventor
 
     if (response.text) {
       const data = JSON.parse(response.text);
-      // Map the API response to our internal InventoryItem structure
       return data.map((item: any) => ({
         ...item,
-        stock: item.quantity || 1 // Default to 1 if AI misses it, mapped to 'stock'
+        stock: item.quantity || 1 
       }));
     }
     return [];
