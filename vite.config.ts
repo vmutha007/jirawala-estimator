@@ -8,7 +8,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     define: {
-      'process.env.API_KEY': JSON.stringify(env.API_KEY),
+      // Prioritize system env, then .env file, then the provided fallback key
+      'process.env.API_KEY': JSON.stringify(process.env.API_KEY || env.API_KEY || "AIzaSyCxWtLWoADMy_ll-CjUno5sxt2Oo98kT04"),
     },
     build: {
       rollupOptions: {

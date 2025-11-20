@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import { InventoryItem } from "../types";
 // @ts-ignore
@@ -14,9 +13,6 @@ try {
 } catch (e) {
     console.warn("PDF.js setup failed", e);
 }
-
-const apiKey = process.env.API_KEY || '';
-const ai = new GoogleGenAI({ apiKey });
 
 // Helper: Compress Image to reduce payload size (Critical for mobile speed)
 const compressImage = (file: File): Promise<string> => {
@@ -95,9 +91,14 @@ const readPdfAsBase64 = (file: File): Promise<string> => {
 };
 
 export const parseInvoiceDocument = async (file: File): Promise<Partial<InventoryItem>[]> => {
+  // Initialize client here to ensure env vars are ready
+  const apiKey = process.env.API_KEY;
+  
   if (!apiKey) {
     throw new Error("API Key is missing. Please set process.env.API_KEY in your build configuration.");
   }
+  
+  const ai = new GoogleGenAI({ apiKey });
 
   const isImage = file.type.startsWith('image/');
   const isPdf = file.type === 'application/pdf';
