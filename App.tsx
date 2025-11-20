@@ -37,7 +37,8 @@ import {
   Key,
   RefreshCw,
   Smartphone,
-  RotateCcw
+  RotateCcw,
+  Share2
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus } from './types';
 import { parseInvoicePDF } from './services/geminiService';
@@ -68,8 +69,6 @@ const numberToWordsSimple = (num: number): string => {
         minimumFractionDigits: 0,
         maximumFractionDigits: 0,
     });
-    // We'll rely on the PDF service for the full "One Lakh..." conversion
-    // This UI helper just formats the number nicely
     return format.format(num);
 };
 
@@ -209,7 +208,7 @@ function App() {
 
   const copyWorkerCode = () => {
       navigator.clipboard.writeText(CLOUDFLARE_WORKER_CODE);
-      alert("Worker Code copied! \n\n1. Go to Cloudflare -> Workers -> [Your Worker] -> Edit Code\n2. Delete old code, PASTE this new code.\n3. Deploy.\n4. Ensure you have bound the KV Namespace to 'STORE'.");
+      alert("Code Copied!\n\n1. Create a NEW Worker in Cloudflare.\n2. Add 'STORE' binding to that new worker.\n3. Paste this code there.");
   };
 
   // --- Inventory Logic ---
@@ -366,19 +365,12 @@ function App() {
   };
 
   const generateInvoiceId = (cust: CustomerProfile): string => {
-      // Clean names to alphabets only
       const firmClean = (cust.firmName || cust.name).replace(/[^a-zA-Z]/g, '').toUpperCase();
       const nameClean = cust.name.replace(/[^a-zA-Z]/g, '').toUpperCase();
-
       const firmPrefix = firmClean.padEnd(3, 'X').substring(0, 3);
       const namePrefix = nameClean.padEnd(3, 'X').substring(0, 3);
-      
       const prefix = `${firmPrefix}${namePrefix}`;
-      
-      const existingCount = estimates.filter(e => 
-          e.invoiceNumber?.startsWith(prefix)
-      ).length;
-
+      const existingCount = estimates.filter(e => e.invoiceNumber?.startsWith(prefix)).length;
       return `${prefix}${existingCount + 1}`;
   };
 
@@ -392,7 +384,6 @@ function App() {
           return;
       }
 
-      // Determine Invoice Number
       let invNum = estimates.find(e => e.id === currentEstimateId)?.invoiceNumber;
       if (status === 'confirmed' && !invNum) {
           invNum = generateInvoiceId(customerDetails);
@@ -427,7 +418,7 @@ function App() {
       }
   };
 
-  const handleGeneratePDF = () => {
+  const handleGeneratePDF = (action: 'print' | 'download') => {
       const currentEst = estimates.find(e => e.id === currentEstimateId);
       generateEstimatePDF(
           customerDetails, 
@@ -435,7 +426,8 @@ function App() {
           businessProfile,
           additionalCharges,
           !currentEst || currentEst.status === 'draft',
-          currentEst?.invoiceNumber
+          currentEst?.invoiceNumber,
+          action
       );
   };
 
@@ -488,7 +480,6 @@ function App() {
       return list.sort((a, b) => {
           const totalA = a.items.reduce((s, i) => s + (i.sellingBasic * (1+i.gstPercent/100)*i.quantity),0) + (a.additionalCharges?.adjustment || 0);
           const totalB = b.items.reduce((s, i) => s + (i.sellingBasic * (1+i.gstPercent/100)*i.quantity),0) + (b.additionalCharges?.adjustment || 0);
-          
           switch(clientSort) {
               case 'date_asc': return new Date(a.date).getTime() - new Date(b.date).getTime();
               case 'date_desc': return new Date(b.date).getTime() - new Date(a.date).getTime();
@@ -512,7 +503,6 @@ function App() {
      return acc;
   }, 0);
 
-  // Render Helper for Sync Indicator
   const getSyncIcon = () => {
       switch(syncStatus) {
           case 'synced': return <Wifi className="w-4 h-4 text-emerald-500" />;
@@ -559,7 +549,7 @@ function App() {
                    <div className="flex items-start justify-between mb-4">
                        <div>
                            <h3 className="font-bold text-blue-900 flex items-center gap-2"><Server className="w-4 h-4" /> Cloudflare Sync Setup</h3>
-                           <p className="text-xs text-blue-700 mt-1">Sync data between devices using Cloudflare Workers KV.</p>
+                           <p className="text-xs text-blue-700 mt-1">Sync requires a <strong>separate</strong> Worker with a KV Binding.</p>
                        </div>
                        <button onClick={copyWorkerCode} className="text-xs bg-white border border-blue-200 text-blue-700 px-3 py-1.5 rounded-lg hover:bg-blue-100 transition flex items-center gap-1 font-medium">
                            <Copy className="w-3 h-3" /> Copy Worker Code
@@ -574,45 +564,26 @@ function App() {
                                <input 
                                   type="text" 
                                   className="w-full border border-blue-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 outline-none"
-                                  placeholder="https://my-worker.username.workers.dev"
+                                  placeholder="https://jirawala-sync.yourname.workers.dev"
                                   value={cloudUrl}
                                   onChange={e => setCloudUrl(e.target.value)}
+                                  onBlur={() => { if(cloudUrl.includes('pages.dev')) alert("Warning: Sync works best with a standard Worker (*.workers.dev), not Pages.") }}
                                />
                            </div>
+                           <p className="text-[10px] text-red-500 mt-1 font-medium">DO NOT use the URL of this app. Use the URL of the separate Sync Worker.</p>
                        </div>
                        <div className="md:col-span-2">
-                           <label className="block text-xs font-bold uppercase text-blue-800 mb-1">Secret Token (Arbitrary)</label>
+                           <label className="block text-xs font-bold uppercase text-blue-800 mb-1">Secret Token</label>
                            <div className="flex items-center gap-2">
                                <Key className="w-4 h-4 text-blue-400" />
                                <input 
                                   type="password" 
                                   className="w-full border border-blue-200 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 outline-none"
-                                  placeholder="Enter a secret key to secure your data"
+                                  placeholder="Enter a secret key"
                                   value={cloudToken}
                                   onChange={e => setCloudToken(e.target.value)}
                                />
                            </div>
-                           <p className="text-[10px] text-blue-600 mt-1">Use the same token on all your devices.</p>
-                       </div>
-                   </div>
-
-                   {/* Share Config Helper */}
-                   <div className="mt-6 pt-4 border-t border-blue-200">
-                       <div className="flex items-center justify-between">
-                            <div>
-                                <h4 className="text-xs font-bold text-blue-900 uppercase mb-1 flex items-center gap-1"><Smartphone className="w-3 h-3"/> Connect Another Device</h4>
-                                <p className="text-[11px] text-blue-700">Enter these same details in the app on your other device.</p>
-                            </div>
-                            <button 
-                                onClick={() => {
-                                    const configStr = `Jirawala Sync Setup\n\nWorker URL:\n${cloudUrl}\n\nSecret Token:\n${cloudToken}`;
-                                    navigator.clipboard.writeText(configStr);
-                                    alert("Configuration copied!\n\nPaste this in an email or message to yourself to set up your other device.");
-                                }}
-                                className="text-xs bg-white border border-blue-200 text-blue-700 px-3 py-2 rounded-lg hover:bg-blue-100 transition flex items-center gap-2 font-medium"
-                            >
-                                <Copy className="w-3 h-3" /> Copy Config
-                            </button>
                        </div>
                    </div>
                </div>
@@ -674,7 +645,7 @@ function App() {
                         <textarea 
                            className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none"
                            rows={4}
-                           placeholder="1. Goods once sold... (One per line)"
+                           placeholder="1. Goods once sold..."
                            value={businessProfile.terms}
                            onChange={e => setBusinessProfile(p => ({...p, terms: e.target.value}))}
                         />
@@ -708,7 +679,7 @@ function App() {
                     </div>
                     <div className="sm:col-span-2">
                         <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Notes / Keywords</label>
-                        <input type="text" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none" value={manualItem.note || ''} onChange={e => setManualItem(p => ({...p, note: e.target.value}))} placeholder="e.g. 12 inch drawer slide (Search tags)" />
+                        <input type="text" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none" value={manualItem.note || ''} onChange={e => setManualItem(p => ({...p, note: e.target.value}))} placeholder="Search tags" />
                     </div>
                     <div>
                          <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Vendor</label>
@@ -764,7 +735,7 @@ function App() {
                  {getSyncIcon()}
                  {syncStatus === 'error' && <span className="text-[10px] text-red-500 font-bold hidden sm:block">Error</span>}
             </button>
-            <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition shrink-0" title="Business Settings">
+            <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition shrink-0" title="Settings">
                 <Settings className="w-5 h-5" />
             </button>
         </div>
@@ -1112,13 +1083,25 @@ function App() {
                                     <EyeOff className="w-3 h-3" /> <span className="hidden sm:inline">Client</span>
                                 </button>
                             </div>
-                            <button 
-                                onClick={handleGeneratePDF}
-                                disabled={estimateItems.length === 0}
-                                className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-slate-900 text-white px-4 lg:px-6 py-2.5 rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm whitespace-nowrap font-medium text-sm"
-                            >
-                                <Printer className="w-4 h-4" /> Print PDF
-                            </button>
+                            
+                            <div className="flex gap-2">
+                                <button 
+                                    onClick={() => handleGeneratePDF('print')}
+                                    disabled={estimateItems.length === 0}
+                                    className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-slate-900 text-white px-4 lg:px-6 py-2.5 rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm whitespace-nowrap font-medium text-sm"
+                                    title="Preview & Print"
+                                >
+                                    <Share2 className="w-4 h-4" /> Print/Share
+                                </button>
+                                <button 
+                                    onClick={() => handleGeneratePDF('download')}
+                                    disabled={estimateItems.length === 0}
+                                    className="flex items-center justify-center gap-2 bg-white border border-slate-200 text-slate-700 px-3 rounded-lg hover:bg-slate-50 disabled:opacity-50 transition shadow-sm"
+                                    title="Download PDF"
+                                >
+                                    <Download className="w-4 h-4" />
+                                </button>
+                            </div>
                         </div>
                     </div>
 

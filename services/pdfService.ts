@@ -42,7 +42,8 @@ export const generateEstimatePDF = (
     business: BusinessProfile,
     additionalCharges: { packing: number; shipping: number; adjustment: number },
     isDraft: boolean = false,
-    invoiceNumber?: string
+    invoiceNumber?: string,
+    action: 'download' | 'print' = 'download'
 ) => {
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.width;
@@ -370,5 +371,12 @@ export const generateEstimatePDF = (
   doc.setFont("helvetica", "normal");
   doc.text("Authorized Signatory", pageWidth - 14, signY + 15, { align: "right" });
 
-  doc.save(`${isDraft ? 'DRAFT_' : invoiceNumber ? invoiceNumber + '_' : 'ORDER_'}${customer.name.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+  const fileName = `${isDraft ? 'DRAFT_' : invoiceNumber ? invoiceNumber + '_' : 'ORDER_'}${customer.name.replace(/[^a-z0-9]/gi, '_')}.pdf`;
+
+  if (action === 'print') {
+      doc.autoPrint();
+      window.open(doc.output('bloburl'), '_blank');
+  } else {
+      doc.save(fileName);
+  }
 };
