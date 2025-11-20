@@ -266,27 +266,16 @@ function App() {
       setBusinessProfile(JSON.parse(savedProfile));
     }
 
-    // INITIALIZE SYNC ON LOAD
+    // Initialize Cloud Config on UI
     const cloudConfig = getCloudConfigDetails();
     if (cloudConfig) {
         setCloudUrl(cloudConfig.workerUrl);
         setCloudToken(cloudConfig.accessToken);
-        // Force check on mount to prevent stale data
-        syncData();
     }
-
-    // Auto Sync every 60 seconds
-    const syncInterval = setInterval(() => {
-        const config = getCloudConfigDetails();
-        if (config?.workerUrl) {
-            syncData();
-        }
-    }, 60000);
 
     return () => {
         unsubInventory();
         unsubEstimates();
-        clearInterval(syncInterval);
     };
   }, []);
 

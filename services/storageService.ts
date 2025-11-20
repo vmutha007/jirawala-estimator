@@ -25,11 +25,12 @@ interface SyncPayload {
 let statusListener: ((status: SyncStatus, message: string) => void) | null = null;
 let inventoryListener: ((items: InventoryItem[]) => void) | null = null;
 let estimatesListener: ((items: EstimateRecord[]) => void) | null = null;
+let syncIntervalId: any = null;
 
 // --- Cloudflare Worker Code Template ---
 export const CLOUDFLARE_WORKER_CODE = `
 /**
- * JIRAWALA SYNC WORKER
+ * JIRAWALA SYNC WORKER (UPDATED)
  * 
  * STEPS:
  * 1. Create a NEW Worker in Cloudflare named 'jirawala-sync'.
@@ -43,6 +44,9 @@ export default {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
     };
 
     if (request.method === "OPTIONS") {
@@ -117,24 +121,24 @@ export const setCloudConfig = (url: string, token: string) => {
     }
     
     localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify({ workerUrl: cleanUrl, accessToken: token.trim() }));
+    startAutoSync();
     syncData(); 
 };
 
 export const getCloudConfigDetails = () => getCloudConfig();
 
-// Helper to force a push by updating the local timestamp
+// CRITICAL: This function ensures the local data is marked as "Newer" than anything else.
 const touchLocalData = () => {
     const storedTS = localStorage.getItem(STORAGE_KEY_LAST_SYNC);
     const current = storedTS ? parseInt(storedTS) : 0;
     
-    // CRITICAL FIX:
-    // We must ensure the new timestamp is strictly greater than what we currently have.
-    // If we just used Date.now(), a device with a slow clock would set a timestamp 
-    // lower than the Cloud's timestamp, causing the Cloud to overwrite the local changes on next sync.
-    // We take the MAX of Real Time vs (LastKnownTime + 1ms).
+    // We create a timestamp that is STRICTLY greater than the current one.
+    // We also ensure it's at least Date.now() to stay somewhat close to real time,
+    // but the priority is being > current.
     const next = Math.max(Date.now(), current + 1);
     
     localStorage.setItem(STORAGE_KEY_LAST_SYNC, next.toString());
+    return next;
 };
 
 export const syncData = async () => {
@@ -152,10 +156,13 @@ export const syncData = async () => {
         const estimates = getLocalEstimates();
         const localTimestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
 
-        // 2. Fetch Remote State
+        // 2. Fetch Remote State (With Anti-Cache Headers)
         const response = await fetch(config.workerUrl, {
             method: 'GET',
-            headers: { 'Authorization': config.accessToken }
+            headers: { 
+                'Authorization': config.accessToken,
+                'Cache-Control': 'no-cache, no-store'
+            }
         });
 
         const contentType = response.headers.get("content-type");
@@ -189,7 +196,10 @@ export const syncData = async () => {
              await pushToCloud(config, inventory, estimates);
              
         } else {
-             // Equal -> No Op
+             // Equal -> Check if we are possibly in a split brain, but usually assume synced.
+             // To be safe, we notify listeners to ensure UI is consistent.
+             if (inventoryListener) inventoryListener(inventory);
+             if (estimatesListener) estimatesListener(estimates);
              notifyStatus('synced', 'Up to date');
         }
 
@@ -216,7 +226,8 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
         method: 'PUT',
         headers: { 
             'Authorization': config.accessToken,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache, no-store'
         },
         body: JSON.stringify(payload)
     });
@@ -231,13 +242,29 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
     notifyStatus('synced', 'Saved to Cloud');
 };
 
+// --- Auto Sync Logic ---
+const startAutoSync = () => {
+    if (syncIntervalId) clearInterval(syncIntervalId);
+    // Sync every 30 seconds
+    syncIntervalId = setInterval(() => {
+        const config = getCloudConfig();
+        if (config?.workerUrl) syncData();
+    }, 30000);
+};
+
 // --- Public API ---
 
 export const onSyncStatusChange = (cb: (status: SyncStatus, message: string) => void) => {
     statusListener = cb;
     const config = getCloudConfig();
-    if (config?.workerUrl) notifyStatus('offline', 'Ready'); 
-    else notifyStatus('offline', 'Local Only');
+    if (config?.workerUrl) {
+        notifyStatus('offline', 'Ready');
+        // Initial Sync on Load
+        syncData();
+        startAutoSync();
+    } else {
+        notifyStatus('offline', 'Local Only');
+    }
 };
 
 export const subscribeToInventory = (cb: (items: InventoryItem[]) => void) => {
@@ -255,10 +282,8 @@ export const subscribeToEstimates = (cb: (items: EstimateRecord[]) => void) => {
 export const addInventoryItem = async (item: InventoryItem) => {
     const inventory = getLocalInventory();
     
-    // 1. Try to find by ID (Edit Mode)
     let idx = inventory.findIndex(i => i.id === item.id);
     
-    // 2. If not found by ID, check if duplicate name exists
     if (idx === -1 && item.productName) {
         idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === item.productName.toLowerCase().trim());
     }
@@ -271,10 +296,10 @@ export const addInventoryItem = async (item: InventoryItem) => {
     }
     
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
-    
     if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); // Mark as dirty with +1 logic
-    await syncData();
+    
+    touchLocalData(); // Bump timestamp
+    await syncData(); // Push immediately
 };
 
 export const addInventoryBatch = async (items: InventoryItem[]) => {
@@ -286,7 +311,6 @@ export const addInventoryBatch = async (items: InventoryItem[]) => {
         const idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === newItem.productName.toLowerCase().trim());
         
         if (idx >= 0) {
-            // Add stock to existing
             const oldStock = inventory[idx].stock;
             inventory[idx] = { 
                 ...newItem, 
@@ -299,31 +323,37 @@ export const addInventoryBatch = async (items: InventoryItem[]) => {
     });
 
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
-    
     if(inventoryListener) inventoryListener(inventory);
+    
     touchLocalData(); 
     await syncData();
 };
 
 export const deleteInventoryItem = async (id: string) => {
     let inventory = getLocalInventory();
+    const initialLength = inventory.length;
     inventory = inventory.filter(i => i.id !== id);
-    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
-    if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); 
-    await syncData();
+    if (inventory.length !== initialLength) {
+        localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+        if(inventoryListener) inventoryListener(inventory);
+        touchLocalData(); 
+        await syncData();
+    }
 };
 
 export const deleteInventoryBatch = async (ids: string[]) => {
     let inventory = getLocalInventory();
     const idSet = new Set(ids);
+    const initialLength = inventory.length;
     inventory = inventory.filter(i => !idSet.has(i.id));
-    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
-    if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); 
-    await syncData();
+    if (inventory.length !== initialLength) {
+        localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+        if(inventoryListener) inventoryListener(inventory);
+        touchLocalData(); 
+        await syncData();
+    }
 };
 
 export const updateInventoryStock = async (adjustments: {id: string, qtyChange: number}[]) => {
@@ -355,6 +385,7 @@ export const saveEstimateRecord = async (record: EstimateRecord) => {
     
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if(estimatesListener) estimatesListener(estimates);
+    
     touchLocalData(); 
     await syncData();
 };
@@ -384,7 +415,6 @@ export const updateEstimatePaymentStatus = async (id: string, status: PaymentSta
     await syncData();
 };
 
-// --- Smart Payment Allocation ---
 export const addPaymentToEstimate = async (targetEstId: string, payment: PaymentEntry) => {
     const estimates = getLocalEstimates();
     const targetIdx = estimates.findIndex(e => e.id === targetEstId);
@@ -392,35 +422,27 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
 
     const targetEst = estimates[targetIdx];
     
-    // Helper to get customer key
     const getCustKey = (c: CustomerProfile) => (c.firmName || c.name || '').toLowerCase().trim() + (c.phone || '').trim();
     const targetCustKey = getCustKey(targetEst.customer);
 
-    // Get all confirmed estimates for this customer to distribute payment
-    // Map them to include their original index so we can update the main array correctly
     const customerEstimatesIndices = estimates
         .map((e, i) => ({ ...e, originalIndex: i }))
         .filter(e => e.status === 'confirmed' && getCustKey(e.customer) === targetCustKey)
-        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()); // Oldest first
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()); 
 
     let remainingAmount = payment.amount;
     const userNote = payment.note ? `${payment.note} - ` : "";
 
-    // Helper to calculate due amount for any estimate
     const calculateDue = (est: EstimateRecord) => {
         const total = est.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) 
                         + est.additionalCharges.adjustment + est.additionalCharges.packing + est.additionalCharges.shipping;
-        // Use history if available, or fallback to amountPaid
         const paid = est.paymentHistory ? est.paymentHistory.reduce((s, p) => s + p.amount, 0) : (est.amountPaid || 0);
         return { total, paid, due: total - paid };
     };
 
-    // Step 1: Pay the Target Invoice first (up to its due amount)
     const targetStats = calculateDue(targetEst);
     if (targetStats.due > 0) {
         const pay = Math.min(targetStats.due, remainingAmount);
-        
-        // Only add if > 0 (though due > 0 check covers it mostly)
         if (pay > 0) {
             const newEntry = { 
                 ...payment, 
@@ -429,26 +451,19 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
                 note: `${userNote}Inv#${targetEst.invoiceNumber || 'Ref'} Payment`
             };
             const est = estimates[targetIdx];
-            
             est.paymentHistory = [...(est.paymentHistory || []), newEntry];
-            
-            // Update Status
             const newStats = calculateDue(est); 
             est.amountPaid = newStats.paid;
             est.paymentStatus = newStats.paid >= newStats.total - 1 ? 'paid' : 'partial';
             est.lastModified = Date.now();
-            
             remainingAmount -= pay;
         }
     }
 
-    // Step 2: Distribute remaining amount to other unpaid invoices (Oldest First)
     if (remainingAmount > 0) {
         for (const otherEst of customerEstimatesIndices) {
-            if (otherEst.id === targetEst.id) continue; // Skip target, already handled
-
+            if (otherEst.id === targetEst.id) continue; 
             const stats = calculateDue(otherEst);
-            // Check if it has dues (tolerance of 1.0 for float issues)
             if (stats.due > 1) {
                 const pay = Math.min(stats.due, remainingAmount);
                 const newEntry = { 
@@ -457,22 +472,18 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
                     id: crypto.randomUUID(), 
                     note: `${userNote}Cleared Inv#${otherEst.invoiceNumber || 'Old Dues'}`
                 };
-                
                 const realIndex = otherEst.originalIndex;
                 const est = estimates[realIndex];
-                
                 est.paymentHistory = [...(est.paymentHistory || []), newEntry];
-                est.amountPaid = (est.amountPaid || 0) + pay; // Simple addition here works as we just pushed history
+                est.amountPaid = (est.amountPaid || 0) + pay; 
                 est.paymentStatus = est.amountPaid >= stats.total - 1 ? 'paid' : 'partial';
                 est.lastModified = Date.now();
-
                 remainingAmount -= pay;
                 if (remainingAmount <= 0) break;
             }
         }
     }
 
-    // Step 3: If there is STILL money left, put it back on the Target Invoice as "Advance"
     if (remainingAmount > 0) {
          const est = estimates[targetIdx];
          const newEntry = { 
@@ -482,11 +493,9 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
              note: `${userNote}Advance / Credit`
          };
          est.paymentHistory = [...(est.paymentHistory || []), newEntry];
-         
-         // Recalculate to update total paid
          const newStats = calculateDue(est);
          est.amountPaid = newStats.paid;
-         est.paymentStatus = 'paid'; // Definitely paid now
+         est.paymentStatus = 'paid'; 
          est.lastModified = Date.now();
     }
 
