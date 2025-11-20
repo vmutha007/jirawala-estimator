@@ -124,12 +124,16 @@ export const getCloudConfigDetails = () => getCloudConfig();
 
 // Helper to force a push by updating the local timestamp
 const touchLocalData = () => {
-    const current = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
-    // CRITICAL FIX: 
-    // Ensure the new timestamp is STRICTLY greater than the last known sync timestamp.
-    // This handles clock skew where the device time might be behind the server time.
-    // We add 100ms to ensure it wins any race.
-    const next = Math.max(Date.now(), current + 100);
+    const storedTS = localStorage.getItem(STORAGE_KEY_LAST_SYNC);
+    const current = storedTS ? parseInt(storedTS) : 0;
+    
+    // CRITICAL FIX:
+    // We must ensure the new timestamp is strictly greater than what we currently have.
+    // If we just used Date.now(), a device with a slow clock would set a timestamp 
+    // lower than the Cloud's timestamp, causing the Cloud to overwrite the local changes on next sync.
+    // We take the MAX of Real Time vs (LastKnownTime + 1ms).
+    const next = Math.max(Date.now(), current + 1);
+    
     localStorage.setItem(STORAGE_KEY_LAST_SYNC, next.toString());
 };
 
@@ -143,12 +147,12 @@ export const syncData = async () => {
     notifyStatus('syncing', 'Syncing...');
 
     try {
-        // 1. Get Local
+        // 1. Get Local State
         const inventory = getLocalInventory();
         const estimates = getLocalEstimates();
         const localTimestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
 
-        // 2. Fetch Remote
+        // 2. Fetch Remote State
         const response = await fetch(config.workerUrl, {
             method: 'GET',
             headers: { 'Authorization': config.accessToken }
@@ -164,23 +168,28 @@ export const syncData = async () => {
         }
 
         const remoteData: SyncPayload = await response.json();
+        const remoteTimestamp = remoteData.timestamp || 0;
         
-        if (!remoteData.timestamp) {
-            // Remote empty -> Push
-            await pushToCloud(config, inventory, estimates);
-        } else if (remoteData.timestamp > localTimestamp) {
-            // Remote newer -> Pull
+        // 3. Compare and Act
+        if (remoteTimestamp > localTimestamp) {
+            // Remote is newer -> PULL
+            console.log(`Pulling from Cloud. Remote: ${remoteTimestamp} > Local: ${localTimestamp}`);
+            
             localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(remoteData.inventory || []));
             localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(remoteData.estimates || []));
-            localStorage.setItem(STORAGE_KEY_LAST_SYNC, remoteData.timestamp.toString());
+            localStorage.setItem(STORAGE_KEY_LAST_SYNC, remoteTimestamp.toString());
             
             if (inventoryListener) inventoryListener(remoteData.inventory || []);
             if (estimatesListener) estimatesListener(remoteData.estimates || []);
             notifyStatus('synced', 'Updated from Cloud');
-        } else if (localTimestamp > remoteData.timestamp) {
-             // Local newer -> Push
+            
+        } else if (localTimestamp > remoteTimestamp) {
+             // Local is newer -> PUSH
+             console.log(`Pushing to Cloud. Local: ${localTimestamp} > Remote: ${remoteTimestamp}`);
              await pushToCloud(config, inventory, estimates);
+             
         } else {
+             // Equal -> No Op
              notifyStatus('synced', 'Up to date');
         }
 
@@ -199,7 +208,7 @@ export const syncData = async () => {
 };
 
 const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], estimates: EstimateRecord[]) => {
-    // Use current local timestamp which we ensured is > last remote in touchLocalData
+    // We read the TS again to be sure we are sending the latest decided stamp
     const timestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || Date.now().toString());
     const payload: SyncPayload = { inventory, estimates, timestamp };
 
@@ -264,7 +273,7 @@ export const addInventoryItem = async (item: InventoryItem) => {
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
     if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); // Mark as dirty
+    touchLocalData(); // Mark as dirty with +1 logic
     await syncData();
 };
 
@@ -292,7 +301,7 @@ export const addInventoryBatch = async (items: InventoryItem[]) => {
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
     if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); // Mark as dirty
+    touchLocalData(); 
     await syncData();
 };
 
@@ -302,7 +311,7 @@ export const deleteInventoryItem = async (id: string) => {
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
     if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); // Mark as dirty for sync
+    touchLocalData(); 
     await syncData();
 };
 
@@ -313,7 +322,7 @@ export const deleteInventoryBatch = async (ids: string[]) => {
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
     if(inventoryListener) inventoryListener(inventory);
-    touchLocalData(); // Mark as dirty
+    touchLocalData(); 
     await syncData();
 };
 
@@ -332,7 +341,7 @@ export const updateInventoryStock = async (adjustments: {id: string, qtyChange: 
     if (changed) {
         localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
         if (inventoryListener) inventoryListener(inventory);
-        touchLocalData(); // Mark as dirty
+        touchLocalData(); 
         await syncData(); 
     }
 };
@@ -346,7 +355,7 @@ export const saveEstimateRecord = async (record: EstimateRecord) => {
     
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if(estimatesListener) estimatesListener(estimates);
-    touchLocalData(); // Mark as dirty
+    touchLocalData(); 
     await syncData();
 };
 
@@ -356,7 +365,7 @@ export const deleteEstimateRecord = async (id: string) => {
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     
     if(estimatesListener) estimatesListener(estimates);
-    touchLocalData(); // Mark as dirty so sync sees the deletion!
+    touchLocalData(); 
     await syncData();
 };
 
@@ -483,7 +492,7 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
 
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if (estimatesListener) estimatesListener(estimates);
-    touchLocalData(); // Mark as dirty
+    touchLocalData(); 
     await syncData();
 };
 
@@ -511,7 +520,7 @@ export const importBackup = async (file: File): Promise<void> => {
                     if(inventoryListener) inventoryListener(data.inventory);
                     if(estimatesListener) estimatesListener(data.estimates);
                     
-                    touchLocalData(); // Mark as dirty
+                    touchLocalData(); 
                     await syncData();
                     resolve();
                 } else {
