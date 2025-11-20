@@ -8,6 +8,7 @@ export interface InventoryItem {
   purchaseDiscountPercent: number;
   gstPercent: number;
   landingPrice: number; // The basic cost to you
+  stock: number; // Quantity on Hand
   note?: string; // Search tags or internal notes
 }
 
@@ -49,6 +50,7 @@ export interface CustomerProfile {
 }
 
 export type EstimateStatus = 'draft' | 'confirmed';
+export type PaymentStatus = 'unpaid' | 'paid' | 'partial';
 
 export interface EstimateRecord {
   id: string;
@@ -56,6 +58,8 @@ export interface EstimateRecord {
   date: string;
   lastModified: number;
   status: EstimateStatus;
+  paymentStatus?: PaymentStatus; // New Field
+  amountPaid?: number; // New Field
   customer: CustomerProfile;
   items: EstimateItem[];
   additionalCharges: {

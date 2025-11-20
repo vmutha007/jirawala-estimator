@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Upload, 
   Trash2, 
@@ -38,18 +38,31 @@ import {
   RefreshCw,
   Smartphone,
   RotateCcw,
-  Share2
+  Share2,
+  CheckSquare,
+  Square,
+  Info,
+  LayoutDashboard,
+  TrendingUp,
+  Package,
+  AlertTriangle,
+  IndianRupee,
+  MessageCircle,
+  Wallet
 } from 'lucide-react';
-import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus } from './types';
+import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus } from './types';
 import { parseInvoicePDF } from './services/geminiService';
 import { 
     subscribeToInventory, 
     subscribeToEstimates, 
     addInventoryItem, 
     deleteInventoryItem, 
+    deleteInventoryBatch,
     addInventoryBatch,
+    updateInventoryStock,
     saveEstimateRecord,
     deleteEstimateRecord,
+    updateEstimatePaymentStatus,
     exportBackup, 
     importBackup,
     onSyncStatusChange,
@@ -72,12 +85,30 @@ const numberToWordsSimple = (num: number): string => {
     return format.format(num);
 };
 
+// Helper to handle "empty" inputs for numbers
+const valOrEmpty = (num: number): string | number => {
+    return num === 0 ? '' : num;
+};
+
+// --- Toast Types ---
+interface Toast {
+    id: string;
+    message: string;
+    type: 'success' | 'error' | 'info';
+}
+
 function App() {
   // --- State ---
-  const [activeTab, setActiveTab] = useState<'inventory' | 'estimate' | 'clients'>('inventory');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'inventory' | 'estimate' | 'clients'>('dashboard');
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [estimates, setEstimates] = useState<EstimateRecord[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  // Toast State
+  const [toasts, setToasts] = useState<Toast[]>([]);
+
+  // Inventory Selection
+  const [selectedInventory, setSelectedInventory] = useState<Set<string>>(new Set());
   
   // Sync Status
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('offline');
@@ -86,7 +117,7 @@ function App() {
   // Business Profile State
   const [showSettings, setShowSettings] = useState(false);
   const [businessProfile, setBusinessProfile] = useState<BusinessProfile>({
-    name: 'Jirawala Estimator',
+    name: 'Jirawala Axis',
     address: '',
     gstin: '',
     phone: '',
@@ -106,7 +137,8 @@ function App() {
     gstPercent: 18,
     purchaseDiscountPercent: 0,
     mrp: 0,
-    landingPrice: 0
+    landingPrice: 0,
+    stock: 0
   });
   
   // Estimate State
@@ -141,6 +173,59 @@ function App() {
   const [clientHistorySearch, setClientHistorySearch] = useState('');
   const [clientFilterDate, setClientFilterDate] = useState('');
   const [clientSort, setClientSort] = useState<'date_desc' | 'date_asc' | 'amt_desc' | 'amt_asc'>('date_desc');
+
+  // --- Dashboard Stats ---
+  const dashboardStats = useMemo(() => {
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      
+      const confirmedEstimates = estimates.filter(e => 
+          e.status === 'confirmed' && 
+          new Date(e.date).getMonth() === currentMonth && 
+          new Date(e.date).getFullYear() === currentYear
+      );
+
+      const totalSales = confirmedEstimates.reduce((acc, est) => {
+          const estTotal = est.items.reduce((sum, i) => sum + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0);
+          return acc + estTotal + est.additionalCharges.adjustment;
+      }, 0);
+
+      const totalProfit = confirmedEstimates.reduce((acc, est) => {
+          const estProfit = est.items.reduce((sum, i) => sum + ((i.sellingBasic - i.landingPrice) * i.quantity), 0);
+          return acc + estProfit + est.additionalCharges.adjustment;
+      }, 0);
+
+      const lowStockItems = inventory.filter(i => i.stock < 10);
+      
+      // Top Items
+      const itemSales: Record<string, number> = {};
+      estimates.filter(e => e.status === 'confirmed').forEach(est => {
+          est.items.forEach(i => {
+              itemSales[i.productName] = (itemSales[i.productName] || 0) + i.quantity;
+          });
+      });
+      const topItems = Object.entries(itemSales)
+          .sort(([,a], [,b]) => b - a)
+          .slice(0, 5)
+          .map(([name, qty]) => ({ name, qty }));
+
+      return {
+          totalSales,
+          totalProfit,
+          orderCount: confirmedEstimates.length,
+          lowStockItems,
+          topItems
+      };
+  }, [estimates, inventory]);
+
+  // --- Toast Helper ---
+  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+      const id = crypto.randomUUID();
+      setToasts(prev => [...prev, { id, message, type }]);
+      setTimeout(() => {
+          setToasts(prev => prev.filter(t => t.id !== id));
+      }, 3000);
+  };
 
   // --- Lifecycle ---
   useEffect(() => {
@@ -194,6 +279,7 @@ function App() {
       const reader = new FileReader();
       reader.onload = (evt) => {
         setBusinessProfile(prev => ({ ...prev, logoUrl: evt.target?.result as string }));
+        addToast("Logo uploaded successfully");
       };
       reader.readAsDataURL(file);
     }
@@ -204,11 +290,12 @@ function App() {
         setCloudConfig(cloudUrl, cloudToken || 'default-key');
      }
      setShowSettings(false);
+     addToast("Settings saved");
   };
 
   const copyWorkerCode = () => {
       navigator.clipboard.writeText(CLOUDFLARE_WORKER_CODE);
-      alert("Code Copied!\n\n1. Create a NEW Worker in Cloudflare.\n2. Add 'STORE' binding to that new worker.\n3. Paste this code there.");
+      addToast("Worker Code Copied to Clipboard!", 'success');
   };
 
   // --- Inventory Logic ---
@@ -217,6 +304,7 @@ function App() {
     if (!file) return;
 
     setIsProcessing(true);
+    addToast("Analyzing PDF...", 'info');
     try {
       const reader = new FileReader();
       reader.onload = async (evt) => {
@@ -232,16 +320,17 @@ function App() {
           purchaseDiscountPercent: item.purchaseDiscountPercent || 0,
           gstPercent: item.gstPercent || 0,
           landingPrice: item.landingPrice || 0,
+          stock: item.stock || 0,
           note: ''
         }));
 
         await addInventoryBatch(newItems);
         setIsProcessing(false);
-        alert(`Successfully extracted ${newItems.length} items!`);
+        addToast(`Successfully added ${newItems.length} items to stock!`, 'success');
       };
       reader.readAsDataURL(file);
     } catch (error) {
-      alert("Failed to parse PDF. Please try a clearer file.");
+      addToast("Failed to parse PDF. Please try a clearer file.", 'error');
       setIsProcessing(false);
     }
   };
@@ -253,6 +342,7 @@ function App() {
         purchaseDiscountPercent: 0,
         mrp: 0,
         landingPrice: 0,
+        stock: 0,
         productName: '',
         vendor: '',
         note: '',
@@ -268,7 +358,7 @@ function App() {
 
   const handleManualInventorySave = async () => {
     if (!manualItem.productName) {
-        alert("Product Name is required");
+        addToast("Product Name is required", 'error');
         return;
     }
 
@@ -281,27 +371,65 @@ function App() {
         purchaseDiscountPercent: Number(manualItem.purchaseDiscountPercent) || 0,
         gstPercent: Number(manualItem.gstPercent) || 0,
         landingPrice: Number(manualItem.landingPrice) || 0,
+        stock: Number(manualItem.stock) || 0,
         note: manualItem.note || ''
     };
 
     await addInventoryItem(newItem);
     setShowManualAdd(false);
+    addToast(manualItem.id ? "Item Updated" : "Item Added", 'success');
   };
 
-  const handleDeleteInventory = async (id: string) => {
+  const handleDeleteInventory = async (id: string, e?: React.MouseEvent) => {
+    if(e) e.stopPropagation();
     if(confirm("Delete this item?")) {
         await deleteInventoryItem(id);
+        // Also remove from selection if present
+        const newSet = new Set(selectedInventory);
+        newSet.delete(id);
+        setSelectedInventory(newSet);
+        addToast("Item deleted", 'info');
     }
   };
 
-  const handleBackup = () => exportBackup(inventory, estimates);
+  // Bulk Selection Logic
+  const toggleInventorySelection = (id: string) => {
+      const newSet = new Set(selectedInventory);
+      if (newSet.has(id)) newSet.delete(id);
+      else newSet.add(id);
+      setSelectedInventory(newSet);
+  };
+
+  const toggleSelectAll = () => {
+      if (selectedInventory.size === inventory.length) {
+          setSelectedInventory(new Set());
+      } else {
+          setSelectedInventory(new Set(inventory.map(i => i.id)));
+      }
+  };
+
+  const handleBulkDelete = async () => {
+      if (selectedInventory.size === 0) return;
+      if (confirm(`Delete ${selectedInventory.size} items?`)) {
+          const count = selectedInventory.size;
+          await deleteInventoryBatch(Array.from(selectedInventory));
+          setSelectedInventory(new Set());
+          addToast(`${count} items deleted`, 'info');
+      }
+  };
+
+  const handleBackup = () => {
+      exportBackup(inventory, estimates);
+      addToast("Backup file downloaded", 'success');
+  };
+  
   const handleRestore = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files?.[0]) {
         try {
             await importBackup(e.target.files[0]);
-            alert("Database Restored!");
+            addToast("Database Restored Successfully!", 'success');
         } catch(err) {
-            alert("Invalid backup file");
+            addToast("Invalid backup file", 'error');
         }
     }
   };
@@ -324,6 +452,7 @@ function App() {
     setEstimateItems(prev => [...prev, newItem]);
     setSearchTerm('');
     setShowSuggestions(false);
+    addToast("Item added to estimate", 'success');
   };
 
   const updateItem = (id: string, updates: Partial<EstimateItem>) => {
@@ -374,13 +503,14 @@ function App() {
       return `${prefix}${existingCount + 1}`;
   };
 
+  // --- STOCK DEDUCTION LOGIC ---
   const handleSaveEstimate = async (status: EstimateStatus) => {
       if (!customerDetails.name) {
-          alert("Please enter customer name");
+          addToast("Please enter customer name", 'error');
           return;
       }
       if (estimateItems.length === 0) {
-          alert("Please add items");
+          addToast("Please add items to estimate", 'error');
           return;
       }
 
@@ -389,32 +519,74 @@ function App() {
           invNum = generateInvoiceId(customerDetails);
       }
 
-      const record: EstimateRecord = {
+      const newRecord: EstimateRecord = {
           id: currentEstimateId || crypto.randomUUID(),
           date: new Date().toISOString(),
           lastModified: Date.now(),
           status,
+          paymentStatus: 'unpaid', // Default for new
           invoiceNumber: invNum,
           customer: customerDetails,
           items: estimateItems,
           additionalCharges
       };
 
-      await saveEstimateRecord(record);
-      setCurrentEstimateId(record.id);
+      // Handle Stock Updates
+      const oldRecord = estimates.find(e => e.id === newRecord.id);
+      const adjustments: {id: string, qtyChange: number}[] = [];
+      const stockMap = new Map<string, number>();
+
+      // If old was confirmed, add back its quantity
+      if (oldRecord && oldRecord.status === 'confirmed') {
+          oldRecord.items.forEach(item => {
+              if (item.inventoryId) {
+                  stockMap.set(item.inventoryId, (stockMap.get(item.inventoryId) || 0) + item.quantity);
+              }
+          });
+      }
+
+      // If new is confirmed, subtract its quantity
+      if (newRecord.status === 'confirmed') {
+          newRecord.items.forEach(item => {
+              if (item.inventoryId) {
+                  stockMap.set(item.inventoryId, (stockMap.get(item.inventoryId) || 0) - item.quantity);
+              }
+          });
+      }
+      
+      stockMap.forEach((qty, id) => {
+          if (qty !== 0) adjustments.push({ id, qtyChange: qty });
+      });
+
+      if (adjustments.length > 0) {
+          await updateInventoryStock(adjustments);
+      }
+
+      await saveEstimateRecord(newRecord);
+      setCurrentEstimateId(newRecord.id);
 
       if (status === 'confirmed') {
-         alert(`Order Confirmed! Invoice No: ${invNum}`);
+         addToast(`Order Confirmed! Stock Updated. Invoice: ${invNum}`, 'success');
       } else {
-         alert("Draft Saved!");
+         addToast("Draft Saved Successfully", 'success');
       }
   };
 
   const handleDeleteEstimate = async (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
-      if(confirm("Permanently delete this estimate/order?")) {
+      if(confirm("Permanently delete this estimate/order? Stock will be restored if confirmed.")) {
+          // Restore stock if confirmed
+          const rec = estimates.find(r => r.id === id);
+          if (rec && rec.status === 'confirmed') {
+              const adjustments = rec.items
+                 .filter(i => i.inventoryId)
+                 .map(i => ({ id: i.inventoryId!, qtyChange: i.quantity }));
+              if(adjustments.length > 0) await updateInventoryStock(adjustments);
+          }
+
           await deleteEstimateRecord(id);
           if(currentEstimateId === id) createNewEstimate();
+          addToast("Estimate Deleted", 'info');
       }
   };
 
@@ -429,6 +601,7 @@ function App() {
           currentEst?.invoiceNumber,
           action
       );
+      addToast(action === 'print' ? "Generating Preview..." : "Downloading PDF...", 'info');
   };
 
   const loadEstimateToEditor = (record: EstimateRecord) => {
@@ -438,6 +611,7 @@ function App() {
       setCurrentEstimateId(record.id);
       setActiveTab('estimate');
       setShowCustomerExtras(!!(record.customer.gstin || record.customer.address));
+      addToast("Estimate Loaded", 'success');
   };
 
   const createNewEstimate = () => {
@@ -447,6 +621,28 @@ function App() {
       setAdditionalCharges({ packing: 0, shipping: 0, adjustment: 0 });
       setCurrentEstimateId(null);
       setActiveTab('estimate');
+      addToast("New Estimate Started", 'info');
+  };
+
+  const handlePaymentUpdate = async (e: React.ChangeEvent<HTMLSelectElement>, estId: string) => {
+      const newStatus = e.target.value as PaymentStatus;
+      await updateEstimatePaymentStatus(estId, newStatus);
+      addToast(`Payment marked as ${newStatus}`, 'success');
+  };
+
+  const openWhatsApp = (est: EstimateRecord, total: number) => {
+      if (!est.customer.phone) {
+          addToast("Customer has no phone number", 'error');
+          return;
+      }
+      
+      const dateStr = new Date(est.date).toLocaleDateString();
+      const statusText = est.paymentStatus === 'paid' ? 'PAID' : 'PENDING';
+      
+      const msg = `Hello ${est.customer.name}, here are the details for your Invoice #${est.invoiceNumber} dated ${dateStr}.\n\nTotal Amount: ₹${total.toFixed(0)}\nStatus: ${statusText}\n\nThank you for your business!\n${businessProfile.name}`;
+      
+      const url = `https://wa.me/91${est.customer.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(msg)}`;
+      window.open(url, '_blank');
   };
 
   // --- Clients Logic ---
@@ -526,10 +722,30 @@ function App() {
           alert(`SYNC ERROR:\n\n${syncMessage}\n\nTroubleshooting:\n1. Check your internet connection.\n2. Ensure the Worker URL is correct in Settings.\n3. Ensure you added the KV Namespace binding named 'STORE' in Cloudflare.`);
       }
       syncData();
+      addToast("Sync triggered", 'info');
   };
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-64">
+      {/* Toast Container */}
+      <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-[60] flex flex-col gap-2 items-center pointer-events-none w-full max-w-sm px-4">
+          {toasts.map(t => (
+              <div 
+                key={t.id} 
+                className={`pointer-events-auto px-4 py-3 rounded-xl shadow-2xl text-sm font-medium text-white animate-fade-in-up flex items-center gap-3 w-auto min-w-[200px] justify-center backdrop-blur-md ${
+                    t.type === 'error' ? 'bg-red-600/95' : 
+                    t.type === 'info' ? 'bg-slate-700/95' : 
+                    'bg-emerald-600/95'
+                }`}
+              >
+                  {t.type === 'success' && <CheckCircle className="w-4 h-4 shrink-0" />}
+                  {t.type === 'error' && <AlertCircle className="w-4 h-4 shrink-0" />}
+                  {t.type === 'info' && <Info className="w-4 h-4 shrink-0" />}
+                  {t.message}
+              </div>
+          ))}
+      </div>
+
       {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
@@ -543,7 +759,6 @@ function App() {
                </button>
              </div>
              <div className="p-6 space-y-8 overflow-y-auto grow">
-               
                {/* Cloudflare Sync Settings */}
                <div className="bg-blue-50 border border-blue-100 rounded-xl p-5">
                    <div className="flex items-start justify-between mb-4">
@@ -555,7 +770,6 @@ function App() {
                            <Copy className="w-3 h-3" /> Copy Worker Code
                        </button>
                    </div>
-                   
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                        <div className="md:col-span-2">
                            <label className="block text-xs font-bold uppercase text-blue-800 mb-1">Worker URL</label>
@@ -567,10 +781,8 @@ function App() {
                                   placeholder="https://jirawala-sync.yourname.workers.dev"
                                   value={cloudUrl}
                                   onChange={e => setCloudUrl(e.target.value)}
-                                  onBlur={() => { if(cloudUrl.includes('pages.dev')) alert("Warning: Sync works best with a standard Worker (*.workers.dev), not Pages.") }}
                                />
                            </div>
-                           <p className="text-[10px] text-red-500 mt-1 font-medium">DO NOT use the URL of this app. Use the URL of the separate Sync Worker.</p>
                        </div>
                        <div className="md:col-span-2">
                            <label className="block text-xs font-bold uppercase text-blue-800 mb-1">Secret Token</label>
@@ -587,7 +799,6 @@ function App() {
                        </div>
                    </div>
                </div>
-
                {/* Business Profile */}
                <div className="space-y-4">
                    <h3 className="font-bold text-slate-700 border-b border-slate-200 pb-2">Business Profile</h3>
@@ -605,7 +816,7 @@ function App() {
                          <input 
                             type="text" 
                             className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none"
-                            placeholder="My Company Pvt Ltd"
+                            placeholder="Jirawala Axis"
                             value={businessProfile.name}
                             onChange={e => setBusinessProfile(p => ({...p, name: e.target.value}))}
                          />
@@ -691,19 +902,23 @@ function App() {
                     </div>
                     <div>
                         <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">MRP</label>
-                        <input type="number" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none" value={manualItem.mrp || ''} onChange={e => setManualItem(p => ({...p, mrp: parseFloat(e.target.value)}))} placeholder="0.00" />
+                        <input type="number" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none" value={valOrEmpty(manualItem.mrp || 0)} onChange={e => setManualItem(p => ({...p, mrp: parseFloat(e.target.value) || 0}))} placeholder="0.00" />
                     </div>
                     <div>
                         <label className="block text-xs font-semibold uppercase text-amber-600 mb-1">Pur. Disc %</label>
-                        <input type="number" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500/20 outline-none text-amber-700" value={manualItem.purchaseDiscountPercent || ''} onChange={e => setManualItem(p => ({...p, purchaseDiscountPercent: parseFloat(e.target.value)}))} placeholder="0" />
+                        <input type="number" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500/20 outline-none text-amber-700" value={valOrEmpty(manualItem.purchaseDiscountPercent || 0)} onChange={e => setManualItem(p => ({...p, purchaseDiscountPercent: parseFloat(e.target.value) || 0}))} placeholder="0" />
                     </div>
                     <div>
                         <label className="block text-xs font-semibold uppercase text-emerald-600 mb-1">Landing Cost</label>
-                        <input type="number" className="w-full border border-emerald-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none text-emerald-700 font-bold" value={manualItem.landingPrice || ''} onChange={e => setManualItem(p => ({...p, landingPrice: parseFloat(e.target.value)}))} placeholder="Net Cost" />
+                        <input type="number" className="w-full border border-emerald-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 outline-none text-emerald-700 font-bold" value={valOrEmpty(manualItem.landingPrice || 0)} onChange={e => setManualItem(p => ({...p, landingPrice: parseFloat(e.target.value) || 0}))} placeholder="Net Cost" />
                     </div>
                     <div>
                         <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">GST %</label>
-                        <input type="number" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none" value={manualItem.gstPercent || ''} onChange={e => setManualItem(p => ({...p, gstPercent: parseFloat(e.target.value)}))} placeholder="18" />
+                        <input type="number" className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none" value={valOrEmpty(manualItem.gstPercent || 0)} onChange={e => setManualItem(p => ({...p, gstPercent: parseFloat(e.target.value) || 0}))} placeholder="18" />
+                    </div>
+                    <div className="sm:col-span-2">
+                        <label className="block text-xs font-semibold uppercase text-blue-600 mb-1">Current Stock Quantity</label>
+                        <input type="number" className="w-full border border-blue-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500/20 outline-none text-blue-900 font-bold" value={valOrEmpty(manualItem.stock || 0)} onChange={e => setManualItem(p => ({...p, stock: parseFloat(e.target.value) || 0}))} placeholder="0" />
                     </div>
                 </div>
                 <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
@@ -722,10 +937,13 @@ function App() {
             <div className="bg-primary/10 p-2 rounded-lg">
                 <Calculator className="w-6 h-6 text-primary" />
             </div>
-            <h1 className="font-bold text-xl tracking-tight text-slate-800 hidden md:block">Jirawala Estimator</h1>
+            <h1 className="font-bold text-xl tracking-tight text-slate-800 hidden md:block">Jirawala Axis</h1>
         </div>
         <div className="flex items-center gap-2 md:gap-3 overflow-x-auto no-scrollbar">
             <div className="flex items-center bg-slate-100 p-1 rounded-lg">
+                <button onClick={() => setActiveTab('dashboard')} className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${activeTab === 'dashboard' ? 'bg-white shadow text-primary' : 'text-slate-500 hover:text-slate-700'}`}>
+                    <LayoutDashboard className="w-4 h-4" /> <span className="hidden sm:inline">Home</span>
+                </button>
                 <button onClick={() => setActiveTab('inventory')} className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'inventory' ? 'bg-white shadow text-primary' : 'text-slate-500 hover:text-slate-700'}`}>Inventory</button>
                 <button onClick={() => setActiveTab('estimate')} className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'estimate' ? 'bg-white shadow text-primary' : 'text-slate-500 hover:text-slate-700'}`}>Estimate</button>
                 <button onClick={() => setActiveTab('clients')} className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'clients' ? 'bg-white shadow text-primary' : 'text-slate-500 hover:text-slate-700'}`}>Clients</button>
@@ -742,6 +960,95 @@ function App() {
       </nav>
 
       <main className="max-w-6xl mx-auto p-3 md:p-4 mt-2 md:mt-4">
+        
+        {/* DASHBOARD TAB */}
+        {activeTab === 'dashboard' && (
+            <div className="space-y-6 animate-fade-in">
+                {/* Top Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col">
+                        <div className="text-slate-500 text-sm font-medium mb-1 flex items-center gap-2"><IndianRupee className="w-4 h-4" /> Total Sales (This Month)</div>
+                        <div className="text-3xl font-bold text-slate-900">{numberToWordsSimple(dashboardStats.totalSales)}</div>
+                        <div className="text-xs text-slate-400 mt-2">{dashboardStats.orderCount} orders processed</div>
+                    </div>
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col">
+                        <div className="text-emerald-600 text-sm font-medium mb-1 flex items-center gap-2"><TrendingUp className="w-4 h-4" /> Net Profit (This Month)</div>
+                        <div className="text-3xl font-bold text-emerald-700">{numberToWordsSimple(dashboardStats.totalProfit)}</div>
+                        <div className="text-xs text-slate-400 mt-2">Based on Landing Cost vs Selling Price</div>
+                    </div>
+                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col">
+                        <div className="text-amber-600 text-sm font-medium mb-1 flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> Low Stock Items</div>
+                        <div className="text-3xl font-bold text-amber-700">{dashboardStats.lowStockItems.length}</div>
+                        <div className="text-xs text-slate-400 mt-2">Items with less than 10 qty</div>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Low Stock List */}
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50">
+                            <h3 className="font-bold text-slate-800 flex items-center gap-2"><Package className="w-4 h-4 text-amber-500" /> Low Stock Alert</h3>
+                        </div>
+                        <div className="flex-1 overflow-y-auto max-h-[300px]">
+                            {dashboardStats.lowStockItems.length === 0 ? (
+                                <div className="p-8 text-center text-slate-400 italic">Stock levels look healthy!</div>
+                            ) : (
+                                <table className="w-full text-sm">
+                                    <thead className="bg-slate-50 text-xs uppercase text-slate-500 sticky top-0">
+                                        <tr>
+                                            <th className="px-4 py-2 text-left">Item</th>
+                                            <th className="px-4 py-2 text-right">Qty</th>
+                                            <th className="px-4 py-2 text-right">Restock</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {dashboardStats.lowStockItems.map(item => (
+                                            <tr key={item.id} className="hover:bg-slate-50">
+                                                <td className="px-4 py-2 font-medium text-slate-700">{item.productName}</td>
+                                                <td className="px-4 py-2 text-right font-bold text-red-600">{item.stock}</td>
+                                                <td className="px-4 py-2 text-right">
+                                                    <button onClick={() => openEditModal(item)} className="text-xs text-blue-600 hover:underline">Edit</button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Top Selling */}
+                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+                        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50">
+                            <h3 className="font-bold text-slate-800 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-500" /> Top Selling Items</h3>
+                        </div>
+                         <div className="flex-1 overflow-y-auto max-h-[300px]">
+                            {dashboardStats.topItems.length === 0 ? (
+                                <div className="p-8 text-center text-slate-400 italic">No sales data yet.</div>
+                            ) : (
+                                <table className="w-full text-sm">
+                                    <thead className="bg-slate-50 text-xs uppercase text-slate-500 sticky top-0">
+                                        <tr>
+                                            <th className="px-4 py-2 text-left">Item</th>
+                                            <th className="px-4 py-2 text-right">Qty Sold</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {dashboardStats.topItems.map((item, idx) => (
+                                            <tr key={idx} className="hover:bg-slate-50">
+                                                <td className="px-4 py-2 font-medium text-slate-700">{item.name}</td>
+                                                <td className="px-4 py-2 text-right font-bold text-emerald-600">{item.qty}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
         {activeTab === 'inventory' && (
             <div className="space-y-4 md:space-y-6 animate-fade-in">
                 {/* Stats / Upload Area */}
@@ -773,6 +1080,12 @@ function App() {
                          <div>
                              <h3 className="font-bold text-slate-800 mb-1">Database</h3>
                              <p className="text-slate-500 text-sm mb-4">{inventory.length} items stored</p>
+                             {selectedInventory.size > 0 && (
+                                 <div className="mb-3 p-2 bg-red-50 text-red-700 rounded-lg text-xs font-medium flex items-center justify-between">
+                                     <span>{selectedInventory.size} selected</span>
+                                     <button onClick={handleBulkDelete} className="bg-red-100 hover:bg-red-200 px-2 py-1 rounded">Delete</button>
+                                 </div>
+                             )}
                          </div>
                          <div className="grid grid-cols-2 gap-2">
                              <button onClick={handleBackup} className="flex items-center justify-center gap-1 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium transition">
@@ -792,9 +1105,15 @@ function App() {
                         <table className="w-full text-sm text-left">
                             <thead className="bg-slate-50 border-b border-slate-200 text-xs uppercase text-slate-500">
                                 <tr>
+                                    <th className="px-4 py-3 w-10">
+                                        <button onClick={toggleSelectAll} className="text-slate-400 hover:text-slate-600">
+                                            {selectedInventory.size > 0 && selectedInventory.size === inventory.length ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                                        </button>
+                                    </th>
                                     <th className="px-4 py-3 min-w-[100px]">Date</th>
                                     <th className="px-4 py-3 min-w-[120px]">Vendor</th>
                                     <th className="px-4 py-3 min-w-[200px]">Product / Note</th>
+                                    <th className="px-4 py-3 text-center min-w-[80px]">Stock</th>
                                     <th className="px-4 py-3 text-right min-w-[80px]">MRP</th>
                                     <th className="px-4 py-3 text-right text-amber-600 min-w-[80px]">Pur. Disc %</th>
                                     <th className="px-4 py-3 text-right min-w-[100px]">Landing Cost</th>
@@ -804,12 +1123,22 @@ function App() {
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {inventory.map(item => (
-                                    <tr key={item.id} className="hover:bg-slate-50">
+                                    <tr key={item.id} className={`hover:bg-slate-50 cursor-pointer ${selectedInventory.has(item.id) ? 'bg-blue-50 hover:bg-blue-100' : ''}`} onClick={() => toggleInventorySelection(item.id)}>
+                                        <td className="px-4 py-3">
+                                            <div className={`w-4 h-4 border rounded flex items-center justify-center ${selectedInventory.has(item.id) ? 'bg-primary border-primary text-white' : 'border-slate-300'}`}>
+                                                {selectedInventory.has(item.id) && <CheckCircle className="w-3 h-3" />}
+                                            </div>
+                                        </td>
                                         <td className="px-4 py-3 text-slate-500 whitespace-nowrap">{item.date}</td>
                                         <td className="px-4 py-3 text-slate-600">{item.vendor}</td>
                                         <td className="px-4 py-3">
                                             <div className="font-medium text-slate-900">{item.productName}</div>
                                             {item.note && <div className="text-xs text-slate-500 italic mt-0.5">{item.note}</div>}
+                                        </td>
+                                        <td className="px-4 py-3 text-center">
+                                            <span className={`px-2 py-1 rounded-full text-xs font-bold ${item.stock < 10 ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700'}`}>
+                                                {item.stock || 0}
+                                            </span>
                                         </td>
                                         <td className="px-4 py-3 text-right">₹{item.mrp}</td>
                                         <td className="px-4 py-3 text-right text-amber-700">{item.purchaseDiscountPercent > 0 ? item.purchaseDiscountPercent + '%' : '-'}</td>
@@ -817,8 +1146,8 @@ function App() {
                                         <td className="px-4 py-3 text-right">{item.gstPercent}%</td>
                                         <td className="px-4 py-3 text-center">
                                             <div className="flex items-center justify-center gap-2">
-                                                <button onClick={() => openEditModal(item)} className="text-slate-400 hover:text-primary transition"><Pencil className="w-4 h-4" /></button>
-                                                <button onClick={() => handleDeleteInventory(item.id)} className="text-slate-400 hover:text-red-500 transition"><Trash2 className="w-4 h-4" /></button>
+                                                <button onClick={(e) => { e.stopPropagation(); openEditModal(item); }} className="text-slate-400 hover:text-primary transition"><Pencil className="w-4 h-4" /></button>
+                                                <button onClick={(e) => handleDeleteInventory(item.id, e)} className="text-slate-400 hover:text-red-500 transition"><Trash2 className="w-4 h-4" /></button>
                                             </div>
                                         </td>
                                     </tr>
@@ -874,7 +1203,7 @@ function App() {
 
                 <div className="bg-white p-4 md:p-6 rounded-xl shadow-sm border border-slate-200">
                     <h2 className="text-xl font-bold text-slate-800 mb-4 flex items-center gap-2">
-                        <Users className="w-5 h-5 text-primary" /> Client History
+                        <Users className="w-5 h-5 text-primary" /> Client Ledger
                     </h2>
                     
                     <div className="space-y-4">
@@ -892,47 +1221,124 @@ function App() {
                                 }
                                 
                                 const sortedDocs = sortEstimates(relevantDocs);
-                                
                                 if(sortedDocs.length === 0) return null;
+
+                                // --- Client Metrics Calculation ---
+                                const clientTotalBusiness = clientDocs.reduce((acc, doc) => {
+                                    if (doc.status === 'confirmed') {
+                                        return acc + doc.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) + doc.additionalCharges.adjustment + doc.additionalCharges.packing + doc.additionalCharges.shipping;
+                                    }
+                                    return acc;
+                                }, 0);
+
+                                const clientTotalDue = clientDocs.reduce((acc, doc) => {
+                                    if (doc.status === 'confirmed' && doc.paymentStatus !== 'paid') {
+                                         // Assuming full amount is due if not paid. 
+                                         // Future improvement: Subtract partial amounts if added to 'amountPaid'
+                                         const total = doc.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) + doc.additionalCharges.adjustment + doc.additionalCharges.packing + doc.additionalCharges.shipping;
+                                         return acc + total;
+                                    }
+                                    return acc;
+                                }, 0);
 
                                 return (
                                     <div key={key} className="border border-slate-200 rounded-lg overflow-hidden">
-                                        <div className="bg-slate-50 px-4 py-3 font-medium text-slate-800 flex justify-between items-center">
-                                            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-3">
-                                                <span className="font-bold">{name}</span>
-                                                {firm && <span className="text-xs sm:text-sm text-slate-500 bg-slate-200 px-2 py-0.5 rounded-full">{firm}</span>}
-                                                <span className="text-xs text-slate-400 hidden sm:inline">| {clientDocs[0].customer.phone}</span>
+                                        {/* Client Header */}
+                                        <div className="bg-slate-50 px-4 py-3 font-medium text-slate-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-2">
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="font-bold text-lg">{name}</span>
+                                                    {firm && <span className="text-xs text-slate-500 bg-slate-200 px-2 py-0.5 rounded-full uppercase tracking-wider">{firm}</span>}
+                                                </div>
+                                                <div className="text-xs text-slate-500 flex items-center gap-2 mt-1">
+                                                    {clientDocs[0].customer.phone && (
+                                                        <span className="flex items-center gap-1"><Smartphone className="w-3 h-3"/> {clientDocs[0].customer.phone}</span>
+                                                    )}
+                                                </div>
                                             </div>
-                                            <span className="text-xs bg-white border border-slate-200 px-2 py-1 rounded-full text-slate-500 whitespace-nowrap ml-2">
-                                                {sortedDocs.length} Rec
-                                            </span>
+                                            
+                                            <div className="flex items-center gap-4 w-full md:w-auto bg-white border border-slate-200 rounded-lg px-3 py-1.5 shadow-sm">
+                                                <div className="text-right">
+                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Total Business</div>
+                                                    <div className="text-sm font-bold text-slate-700">₹{numberToWordsSimple(clientTotalBusiness)}</div>
+                                                </div>
+                                                <div className="h-8 w-px bg-slate-100"></div>
+                                                <div className="text-right">
+                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Total Due</div>
+                                                    <div className={`text-sm font-bold ${clientTotalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                                        ₹{numberToWordsSimple(clientTotalDue)}
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
+                                        
+                                        {/* Doc List */}
                                         <div className="divide-y divide-slate-100">
                                             {sortedDocs.map(doc => {
                                                 const docTotal = doc.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) + doc.additionalCharges.adjustment + doc.additionalCharges.packing + doc.additionalCharges.shipping;
                                                 const dateObj = new Date(doc.lastModified || doc.date);
                                                 
                                                 return (
-                                                    <div key={doc.id} className="px-4 py-3 flex justify-between items-center hover:bg-slate-50 transition">
-                                                        <div>
+                                                    <div key={doc.id} className="px-4 py-3 flex flex-col sm:flex-row justify-between items-center gap-3 hover:bg-slate-50 transition group">
+                                                        <div className="w-full sm:w-auto">
                                                             <div className="text-sm font-medium flex items-center gap-2">
                                                                 <span className={`w-2 h-2 rounded-full shrink-0 ${doc.status === 'confirmed' ? 'bg-emerald-500' : 'bg-amber-400'}`}></span>
-                                                                {doc.status === 'confirmed' ? `Order #${doc.invoiceNumber || 'PENDING'}` : 'Draft'}
+                                                                {doc.status === 'confirmed' ? (
+                                                                    <span className="text-slate-900">Inv <span className="font-mono">#{doc.invoiceNumber}</span></span>
+                                                                ) : (
+                                                                    <span className="text-slate-500 italic">Draft</span>
+                                                                )}
+                                                                
                                                             </div>
-                                                            <div className="text-xs text-slate-500 flex flex-col sm:flex-row sm:gap-3 mt-1">
-                                                                <span>{dateObj.toLocaleDateString()} {dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                                                            <div className="text-xs text-slate-500 flex flex-wrap gap-2 mt-1">
+                                                                <span>{dateObj.toLocaleDateString()}</span>
                                                                 <span className="hidden sm:inline">•</span>
                                                                 <span>{doc.items.length} Items</span>
                                                                 <span className="hidden sm:inline">•</span>
                                                                 <span className="font-semibold text-slate-700">₹{docTotal.toFixed(0)}</span>
                                                             </div>
                                                         </div>
-                                                        <div className="flex items-center gap-2">
+                                                        
+                                                        {/* Actions */}
+                                                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                                                            {/* Payment Status Dropdown */}
+                                                            {doc.status === 'confirmed' && (
+                                                                <div className="relative">
+                                                                    <select 
+                                                                        value={doc.paymentStatus || 'unpaid'} 
+                                                                        onChange={(e) => handlePaymentUpdate(e, doc.id)}
+                                                                        className={`text-xs font-bold py-1 pl-2 pr-6 rounded border appearance-none cursor-pointer outline-none transition ${
+                                                                            doc.paymentStatus === 'paid' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                                                                            doc.paymentStatus === 'partial' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                                                                            'bg-red-50 text-red-700 border-red-200'
+                                                                        }`}
+                                                                    >
+                                                                        <option value="unpaid">Unpaid</option>
+                                                                        <option value="partial">Partial</option>
+                                                                        <option value="paid">Paid</option>
+                                                                    </select>
+                                                                    <Wallet className="w-3 h-3 absolute right-2 top-1.5 opacity-50 pointer-events-none" />
+                                                                </div>
+                                                            )}
+
+                                                            {/* WhatsApp Button */}
+                                                            {doc.customer.phone && (
+                                                                <button 
+                                                                    onClick={() => openWhatsApp(doc, docTotal)}
+                                                                    className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-md transition border border-transparent hover:border-emerald-200"
+                                                                    title="Share on WhatsApp"
+                                                                >
+                                                                    <MessageCircle className="w-4 h-4" />
+                                                                </button>
+                                                            )}
+                                                            
+                                                            <div className="h-4 w-px bg-slate-200 mx-1"></div>
+
                                                             <button 
                                                                 onClick={() => loadEstimateToEditor(doc)}
-                                                                className="text-xs bg-white border border-slate-200 hover:border-primary hover:text-primary px-3 py-1.5 rounded-md transition ml-2"
+                                                                className="text-xs bg-white border border-slate-200 hover:border-primary hover:text-primary px-3 py-1.5 rounded-md transition"
                                                             >
-                                                                Open
+                                                                View
                                                             </button>
                                                             <button 
                                                                 onClick={(e) => handleDeleteEstimate(doc.id, e)}
@@ -1151,6 +1557,7 @@ function App() {
                                             <div className="text-xs text-slate-500 flex gap-2">
                                                 <span>MRP: ₹{item.mrp}</span>
                                                 <span className="text-emerald-600">Cost: ₹{item.landingPrice}</span>
+                                                <span className={`font-bold ${item.stock < 10 ? 'text-red-500' : 'text-blue-500'}`}>Stock: {item.stock}</span>
                                                 {item.note && <span className="text-slate-400 italic">- {item.note}</span>}
                                             </div>
                                         </div>
@@ -1185,9 +1592,13 @@ function App() {
                                 ) : (
                                     estimateItems.map((item, idx) => {
                                         const calc = calculateRow(item);
-                                        const displayedCustDisc = (item.mrp > 0 && item.sellingBasic < item.mrp) 
-                                            ? ((item.mrp - item.sellingBasic) / item.mrp * 100).toFixed(2) 
-                                            : '';
+                                        // Calculate current discount for display
+                                        const currentDisc = (item.mrp > 0 && item.sellingBasic < item.mrp) 
+                                            ? ((item.mrp - item.sellingBasic) / item.mrp * 100)
+                                            : 0;
+                                        
+                                        // Format for display - if 0 show empty string
+                                        const displayedCustDisc = currentDisc === 0 ? '' : parseFloat(currentDisc.toFixed(2));
 
                                         return (
                                             <tr key={item.id} className="group hover:bg-slate-50 align-top">
@@ -1206,7 +1617,7 @@ function App() {
                                                                 <span className="uppercase tracking-wider font-semibold">MRP:</span>
                                                                 <input 
                                                                   type="number" 
-                                                                  value={item.mrp} 
+                                                                  value={valOrEmpty(item.mrp)} 
                                                                   onChange={(e) => updateItem(item.id, { mrp: parseFloat(e.target.value) || 0 })} 
                                                                   className="w-14 bg-transparent border-b border-slate-300 text-slate-700 p-0 focus:outline-none focus:border-primary h-4" 
                                                                 />
@@ -1216,7 +1627,7 @@ function App() {
                                                                 <span className="uppercase tracking-wider font-semibold text-emerald-600">Landing:</span>
                                                                 <input 
                                                                   type="number" 
-                                                                  value={item.landingPrice} 
+                                                                  value={valOrEmpty(item.landingPrice)} 
                                                                   onChange={(e) => updateItem(item.id, { landingPrice: parseFloat(e.target.value) || 0 })} 
                                                                   className="w-14 bg-transparent border-b border-slate-300 text-emerald-700 p-0 focus:outline-none focus:border-primary h-4" 
                                                                 />
@@ -1225,31 +1636,46 @@ function App() {
                                                     )}
                                                 </td>
                                                 <td className="px-2 md:px-4 py-4 text-center">
-                                                    <input type="number" value={item.quantity} onChange={(e) => updateItem(item.id, { quantity: parseFloat(e.target.value) || 0 })} className="w-10 md:w-12 text-center bg-slate-100 rounded border-none focus:ring-1 focus:ring-primary p-1 font-medium text-sm" />
+                                                    <input type="number" value={valOrEmpty(item.quantity)} onChange={(e) => updateItem(item.id, { quantity: parseFloat(e.target.value) || 0 })} className="w-10 md:w-12 text-center bg-slate-100 rounded border-none focus:ring-1 focus:ring-primary p-1 font-medium text-sm" />
                                                 </td>
                                                 {viewMode === 'editor' && (
                                                     <td className="px-2 md:px-4 py-4 text-right bg-amber-50 align-middle">
                                                         <div className="flex items-center justify-end gap-1">
-                                                            <input type="number" step="any" value={item.marginPercent} onChange={(e) => {const val = e.target.value; updateItem(item.id, { marginPercent: val === '' ? 0 : parseFloat(val) });}} className="w-12 md:w-14 text-right bg-transparent border-b border-amber-300 focus:border-amber-600 focus:outline-none p-0 text-amber-800 font-medium text-sm" />
+                                                            <input type="number" step="any" value={valOrEmpty(item.marginPercent)} onChange={(e) => {const val = e.target.value; updateItem(item.id, { marginPercent: val === '' ? 0 : parseFloat(val) });}} className="w-12 md:w-14 text-right bg-transparent border-b border-amber-300 focus:border-amber-600 focus:outline-none p-0 text-amber-800 font-medium text-sm" />
                                                             <span className="text-amber-600 text-xs">%</span>
                                                         </div>
                                                     </td>
                                                 )}
                                                 <td className="px-2 md:px-4 py-4 text-right align-middle">
                                                     <div className="flex items-center justify-end gap-1">
-                                                        <input type="number" step="any" disabled={item.mrp <= 0} placeholder={item.mrp > 0 ? "0" : "-"} defaultValue={displayedCustDisc} onBlur={(e) => {const newDisc = parseFloat(e.target.value) || 0; if(item.mrp > 0) {const newSelling = item.mrp * (1 - (newDisc / 100)); updateItem(item.id, { sellingBasic: newSelling }); e.target.value = newDisc.toFixed(2); }}} onKeyDown={(e) => {if(e.key === 'Enter') {const newDisc = parseFloat(e.currentTarget.value) || 0; if(item.mrp > 0) {const newSelling = item.mrp * (1 - (newDisc / 100)); updateItem(item.id, { sellingBasic: newSelling }); e.currentTarget.blur(); }}}} className="w-12 md:w-14 text-right bg-transparent border-b border-slate-200 hover:border-blue-400 focus:border-blue-600 focus:outline-none text-blue-600 font-semibold p-0 disabled:opacity-50 disabled:cursor-not-allowed placeholder-slate-300 text-sm" />
+                                                        <input 
+                                                            type="number" 
+                                                            step="any" 
+                                                            disabled={item.mrp <= 0} 
+                                                            placeholder={item.mrp > 0 ? "" : "-"} 
+                                                            value={displayedCustDisc}
+                                                            onChange={(e) => {
+                                                                const newDisc = parseFloat(e.target.value) || 0;
+                                                                if (item.mrp > 0) {
+                                                                    // Calculate new selling basic based on discount
+                                                                    const newSelling = item.mrp * (1 - (newDisc / 100));
+                                                                    updateItem(item.id, { sellingBasic: newSelling });
+                                                                }
+                                                            }}
+                                                            className="w-12 md:w-14 text-right bg-transparent border-b border-slate-200 hover:border-blue-400 focus:border-blue-600 focus:outline-none text-blue-600 font-semibold p-0 disabled:opacity-50 disabled:cursor-not-allowed placeholder-slate-300 text-sm" 
+                                                        />
                                                         <span className="text-blue-400 text-xs">%</span>
                                                     </div>
                                                 </td>
                                                 <td className="px-2 md:px-4 py-4 text-right align-middle">
                                                     <div className="flex items-center justify-end gap-1">
                                                         <span className="text-slate-400 text-xs">₹</span>
-                                                        <input type="number" step="any" value={item.sellingBasic} onChange={(e) => {const val = e.target.value; updateItem(item.id, { sellingBasic: val === '' ? 0 : parseFloat(val) })}} className="w-16 md:w-20 text-right bg-transparent border-b border-slate-200 focus:border-primary focus:outline-none font-semibold text-slate-900 p-0 text-sm" />
+                                                        <input type="number" step="any" value={valOrEmpty(parseFloat(item.sellingBasic.toFixed(2)))} onChange={(e) => {const val = e.target.value; updateItem(item.id, { sellingBasic: val === '' ? 0 : parseFloat(val) })}} className="w-16 md:w-20 text-right bg-transparent border-b border-slate-200 focus:border-primary focus:outline-none font-semibold text-slate-900 p-0 text-sm" />
                                                     </div>
                                                 </td>
                                                 <td className="px-2 md:px-4 py-4 text-right align-middle">
                                                     <div className="flex items-center justify-end gap-1">
-                                                        <input type="number" value={item.gstPercent} onChange={(e) => updateItem(item.id, { gstPercent: parseFloat(e.target.value) || 0 })} className="w-8 text-right bg-transparent border-b border-dashed border-slate-300 focus:outline-none p-0 text-slate-500 text-sm" />
+                                                        <input type="number" value={valOrEmpty(item.gstPercent)} onChange={(e) => updateItem(item.id, { gstPercent: parseFloat(e.target.value) || 0 })} className="w-8 text-right bg-transparent border-b border-dashed border-slate-300 focus:outline-none p-0 text-slate-500 text-sm" />
                                                         <span className="text-slate-400 text-xs">%</span>
                                                     </div>
                                                 </td>
@@ -1281,12 +1707,12 @@ function App() {
                                 </div>
                                 <div className="text-right pl-0 md:pl-8 md:border-l border-slate-200 space-y-2 min-w-[200px] w-full md:w-auto pt-4 md:pt-0 border-t md:border-t-0">
                                     <div className="flex justify-between text-sm text-slate-500"><span>Items Total:</span><span>₹{subTotal.toFixed(0)}</span></div>
-                                    <div className="flex justify-between items-center gap-4 text-sm text-slate-500"><span>Packing/Handling:</span><div className="flex items-center gap-1 w-20"><span>+₹</span><input type="number" className="w-full bg-white border border-slate-300 rounded px-1 py-0.5 text-right text-slate-800" value={additionalCharges.packing} onChange={e => setAdditionalCharges(p => ({...p, packing: parseFloat(e.target.value) || 0}))} /></div></div>
-                                    <div className="flex justify-between items-center gap-4 text-sm text-slate-500"><span>Freight/Shipping:</span><div className="flex items-center gap-1 w-20"><span>+₹</span><input type="number" className="w-full bg-white border border-slate-300 rounded px-1 py-0.5 text-right text-slate-800" value={additionalCharges.shipping} onChange={e => setAdditionalCharges(p => ({...p, shipping: parseFloat(e.target.value) || 0}))} /></div></div>
+                                    <div className="flex justify-between items-center gap-4 text-sm text-slate-500"><span>Packing/Handling:</span><div className="flex items-center gap-1 w-20"><span>+₹</span><input type="number" className="w-full bg-white border border-slate-300 rounded px-1 py-0.5 text-right text-slate-800" value={valOrEmpty(additionalCharges.packing)} onChange={e => setAdditionalCharges(p => ({...p, packing: parseFloat(e.target.value) || 0}))} /></div></div>
+                                    <div className="flex justify-between items-center gap-4 text-sm text-slate-500"><span>Freight/Shipping:</span><div className="flex items-center gap-1 w-20"><span>+₹</span><input type="number" className="w-full bg-white border border-slate-300 rounded px-1 py-0.5 text-right text-slate-800" value={valOrEmpty(additionalCharges.shipping)} onChange={e => setAdditionalCharges(p => ({...p, shipping: parseFloat(e.target.value) || 0}))} /></div></div>
                                     <div className="flex justify-between items-center gap-4 text-sm text-slate-500"><span>{additionalCharges.adjustment > 0 ? 'Surcharge/Adj:' : 'Round Off/Disc:'}</span><span className={`font-medium ${additionalCharges.adjustment > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>{additionalCharges.adjustment > 0 ? '+' : ''}₹{additionalCharges.adjustment.toFixed(2)}</span></div>
                                     <div className="pt-2 border-t border-slate-300">
                                         <div className="text-sm text-slate-900 font-bold mb-1 flex items-center justify-between md:justify-end gap-2">Grand Total <Pencil className="w-3 h-3 text-slate-400" /></div>
-                                        <div className="flex items-center justify-between md:justify-end gap-1"><span className="text-2xl font-bold text-slate-900">₹</span><input type="number" className="w-32 text-3xl font-bold text-slate-900 bg-transparent border-b-2 border-dashed border-slate-300 focus:border-primary focus:outline-none text-right" value={grandTotal.toFixed(0)} onChange={e => handleGrandTotalChange(parseFloat(e.target.value) || 0)} /></div>
+                                        <div className="flex items-center justify-between md:justify-end gap-1"><span className="text-2xl font-bold text-slate-900">₹</span><input type="number" className="w-32 text-3xl font-bold text-slate-900 bg-transparent border-b-2 border-dashed border-slate-300 focus:border-primary focus:outline-none text-right" value={valOrEmpty(parseFloat(grandTotal.toFixed(0)))} onChange={e => handleGrandTotalChange(parseFloat(e.target.value) || 0)} /></div>
                                         <div className="text-xs text-slate-500 mt-1 italic text-right">{numberToWordsSimple(Math.round(grandTotal))}</div>
                                     </div>
                                 </div>

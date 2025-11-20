@@ -28,6 +28,7 @@ export const parseInvoicePDF = async (base64Pdf: string): Promise<Partial<Invent
     - Purchase Discount Percentage: The discount % given by vendor to buyer on this invoice.
     - GST Percentage: The tax rate (e.g., 18, 12, 28, 5). Look for CGST+SGST or IGST columns.
     - Landing Price: The final effective BASIC UNIT COST to the buyer (After discount, BEFORE tax). If the invoice lists a "Net Rate" or "Basic Rate", use that. 
+    - Quantity: The number of units purchased. Default to 1 if not specified.
 
     Return a clean JSON array.
   `;
@@ -61,7 +62,8 @@ export const parseInvoicePDF = async (base64Pdf: string): Promise<Partial<Invent
               mrp: { type: Type.NUMBER },
               purchaseDiscountPercent: { type: Type.NUMBER },
               gstPercent: { type: Type.NUMBER },
-              landingPrice: { type: Type.NUMBER, description: "Unit basic cost after discount" }
+              landingPrice: { type: Type.NUMBER, description: "Unit basic cost after discount" },
+              quantity: { type: Type.NUMBER, description: "Quantity purchased" }
             }
           }
         }
@@ -70,7 +72,11 @@ export const parseInvoicePDF = async (base64Pdf: string): Promise<Partial<Invent
 
     if (response.text) {
       const data = JSON.parse(response.text);
-      return data;
+      // Map the API response to our internal InventoryItem structure
+      return data.map((item: any) => ({
+        ...item,
+        stock: item.quantity || 1 // Default to 1 if AI misses it, mapped to 'stock'
+      }));
     }
     return [];
   } catch (error) {

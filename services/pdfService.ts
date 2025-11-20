@@ -11,15 +11,46 @@ const numberToWords = (num: number): string => {
   const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
 
   const inWords = (n: number): string => {
-    if ((n = n.toString() as any).length > 9) return 'overflow';
-    const n_array: any = ('000000000' + n).substr(-9).match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
+    const s = n.toString();
+    if (s.length > 9) return 'overflow';
+    
+    // Use slice instead of substr
+    const padded = ('000000000' + s).slice(-9);
+    const n_array = padded.match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
+    
     if (!n_array) return ''; 
     let str = '';
-    str += (n_array[1] != 0) ? (a[Number(n_array[1])] || b[n_array[1][0]] + ' ' + a[n_array[1][1]]) + 'Crore ' : '';
-    str += (n_array[2] != 0) ? (a[Number(n_array[2])] || b[n_array[2][0]] + ' ' + a[n_array[2][1]]) + 'Lakh ' : '';
-    str += (n_array[3] != 0) ? (a[Number(n_array[3])] || b[n_array[3][0]] + ' ' + a[n_array[3][1]]) + 'Thousand ' : '';
-    str += (n_array[4] != 0) ? (a[Number(n_array[4])] || b[n_array[4][0]] + ' ' + a[n_array[4][1]]) + 'Hundred ' : '';
-    str += (n_array[5] != 0) ? ((str != '') ? 'and ' : '') + (a[Number(n_array[5])] || b[n_array[5][0]] + ' ' + a[n_array[5][1]]) + '' : '';
+    
+    const getPart = (idx: number, label: string) => {
+        const val = Number(n_array[idx]);
+        if (val === 0) return '';
+        
+        let txt = '';
+        if (a[val]) {
+            txt = a[val];
+        } else {
+            const digits = n_array[idx].split('');
+            txt = b[Number(digits[0])] + ' ' + a[Number(digits[1])];
+        }
+        return txt + label;
+    };
+
+    str += getPart(1, 'Crore ');
+    str += getPart(2, 'Lakh ');
+    str += getPart(3, 'Thousand ');
+    str += getPart(4, 'Hundred ');
+    
+    const lastPartVal = Number(n_array[5]);
+    if (lastPartVal !== 0) {
+        if (str !== '') str += 'and ';
+        if (a[lastPartVal]) {
+            str += a[lastPartVal];
+        } else {
+             const digits = n_array[5].split('');
+             str += b[Number(digits[0])] + ' ' + a[Number(digits[1])];
+        }
+    }
+    
     return str;
   };
 
@@ -60,12 +91,11 @@ export const generateEstimatePDF = (
   // Watermark for Draft
   if (isDraft) {
       doc.setFontSize(80);
-      doc.setTextColor(240, 240, 240);
+      // Use light grey to simulate transparency without using potentially unsupported GState methods
+      doc.setTextColor(230, 230, 230); 
       doc.setFont("helvetica", "bold");
-      (doc as any).withGraphicsState({ opacity: 0.5 } as any, () => {
-        doc.text("DRAFT", pageWidth / 2, pageHeight / 2, { align: 'center', angle: 45 });
-      });
-      doc.setTextColor(0);
+      doc.text("DRAFT", pageWidth / 2, pageHeight / 2, { align: 'center', angle: 45 });
+      doc.setTextColor(0); // Reset to black
   }
 
   // --- Header Section ---
@@ -84,7 +114,7 @@ export const generateEstimatePDF = (
   doc.setFont("helvetica", "bold");
   doc.setFontSize(20);
   doc.setTextColor(15, 23, 42); // Slate 900
-  doc.text(business.name || "Jirawala Estimator", pageWidth - 14, yPos, { align: "right" });
+  doc.text(business.name || "Jirawala Axis", pageWidth - 14, yPos, { align: "right" });
   yPos += 6;
 
   doc.setFont("helvetica", "normal");
@@ -364,7 +394,7 @@ export const generateEstimatePDF = (
   doc.setFontSize(9);
   doc.setTextColor(15, 23, 42);
   doc.setFont("helvetica", "bold");
-  doc.text("For " + (business.name || "Jirawala Estimator"), pageWidth - 14, signY, { align: "right" });
+  doc.text("For " + (business.name || "Jirawala Axis"), pageWidth - 14, signY, { align: "right" });
   
   doc.setFontSize(8);
   doc.setTextColor(148, 163, 184);

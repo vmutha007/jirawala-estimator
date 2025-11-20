@@ -1,5 +1,5 @@
 
-import { InventoryItem, EstimateRecord } from "../types";
+import { InventoryItem, EstimateRecord, PaymentStatus } from "../types";
 
 // --- Configuration Constants ---
 const STORAGE_KEY_INVENTORY = "jirawala_inventory_data";
@@ -208,116 +208,146 @@ export const onSyncStatusChange = (cb: (status: SyncStatus, message: string) => 
     else notifyStatus('offline', 'Local Only');
 };
 
-export const subscribeToInventory = (onUpdate: (items: InventoryItem[]) => void) => {
-    inventoryListener = onUpdate;
-    const data = getLocalInventory();
-    onUpdate(data);
-    setTimeout(syncData, 1000);
+export const subscribeToInventory = (cb: (items: InventoryItem[]) => void) => {
+    inventoryListener = cb;
+    cb(getLocalInventory());
     return () => { inventoryListener = null; };
 };
 
-export const subscribeToEstimates = (onUpdate: (items: EstimateRecord[]) => void) => {
-    estimatesListener = onUpdate;
-    const data = getLocalEstimates();
-    onUpdate(data);
+export const subscribeToEstimates = (cb: (items: EstimateRecord[]) => void) => {
+    estimatesListener = cb;
+    cb(getLocalEstimates());
     return () => { estimatesListener = null; };
 };
 
-// --- CRUD ---
-
-const triggerAutoSync = () => {
-    localStorage.setItem("jirawala_last_sync_ts", Date.now().toString());
-    setTimeout(syncData, 1000); 
-};
-
 export const addInventoryItem = async (item: InventoryItem) => {
-    const items = getLocalInventory();
-    const idx = items.findIndex(i => i.id === item.id);
-    if (idx >= 0) items[idx] = item; else items.unshift(item);
+    const inventory = getLocalInventory();
+    // Check if update
+    const idx = inventory.findIndex(i => i.id === item.id);
+    if(idx >= 0) inventory[idx] = item;
+    else inventory.push(item);
     
-    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(items));
-    if (inventoryListener) inventoryListener(items);
-    triggerAutoSync();
+    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    if(inventoryListener) inventoryListener(inventory);
+    await syncData();
 };
 
-export const addInventoryBatch = async (newItems: InventoryItem[]) => {
-    const current = getLocalInventory();
-    const combined = [...newItems, ...current];
-    
-    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(combined));
-    if (inventoryListener) inventoryListener(combined);
-    triggerAutoSync();
+export const addInventoryBatch = async (items: InventoryItem[]) => {
+    const inventory = getLocalInventory();
+    inventory.push(...items);
+    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    if(inventoryListener) inventoryListener(inventory);
+    await syncData();
 };
 
 export const deleteInventoryItem = async (id: string) => {
-    const items = getLocalInventory();
-    const newItems = items.filter(i => i.id !== id);
-    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(newItems));
-    if (inventoryListener) inventoryListener(newItems);
-    triggerAutoSync();
+    let inventory = getLocalInventory();
+    inventory = inventory.filter(i => i.id !== id);
+    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    if(inventoryListener) inventoryListener(inventory);
+    await syncData();
+};
+
+export const deleteInventoryBatch = async (ids: string[]) => {
+    let inventory = getLocalInventory();
+    const idSet = new Set(ids);
+    inventory = inventory.filter(i => !idSet.has(i.id));
+    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    if(inventoryListener) inventoryListener(inventory);
+    await syncData();
+};
+
+export const updateInventoryStock = async (adjustments: {id: string, qtyChange: number}[]) => {
+    const inventory = getLocalInventory();
+    let changed = false;
+    
+    adjustments.forEach(adj => {
+        const item = inventory.find(i => i.id === adj.id);
+        if (item) {
+            item.stock = (item.stock || 0) + adj.qtyChange;
+            changed = true;
+        }
+    });
+
+    if (changed) {
+        localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+        if (inventoryListener) inventoryListener(inventory);
+        // Note: Not waiting for sync here to make UI snappy, sync happens in background via debouncing usually, 
+        // but here we just fire and forget for now or rely on next sync.
+        syncData(); 
+    }
 };
 
 export const saveEstimateRecord = async (record: EstimateRecord) => {
-    const items = getLocalEstimates();
-    const idx = items.findIndex(i => i.id === record.id);
-    if (idx >= 0) items[idx] = record; else items.unshift(record);
-    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(items));
-    if (estimatesListener) estimatesListener(items);
-    triggerAutoSync();
+    const estimates = getLocalEstimates();
+    const idx = estimates.findIndex(e => e.id === record.id);
+    if(idx >= 0) estimates[idx] = record;
+    else estimates.push(record);
+    
+    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
+    if(estimatesListener) estimatesListener(estimates);
+    await syncData();
 };
 
 export const deleteEstimateRecord = async (id: string) => {
-    const items = getLocalEstimates();
-    const newItems = items.filter(i => i.id !== id);
-    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(newItems));
-    if (estimatesListener) estimatesListener(newItems);
-    triggerAutoSync();
+    let estimates = getLocalEstimates();
+    estimates = estimates.filter(e => e.id !== id);
+    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
+    if(estimatesListener) estimatesListener(estimates);
+    await syncData();
 };
 
-// --- Backup / Restore ---
+export const updateEstimatePaymentStatus = async (id: string, status: PaymentStatus, amountPaid?: number) => {
+    const estimates = getLocalEstimates();
+    const idx = estimates.findIndex(e => e.id === id);
+    if (idx === -1) return;
+    
+    estimates[idx].paymentStatus = status;
+    if (amountPaid !== undefined) estimates[idx].amountPaid = amountPaid;
+    estimates[idx].lastModified = Date.now();
+    
+    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
+    if (estimatesListener) estimatesListener(estimates);
+    
+    syncData();
+};
+
 export const exportBackup = (inventory: InventoryItem[], estimates: EstimateRecord[]) => {
-  const backupData = {
-    inventory,
-    estimates,
-    timestamp: new Date().toISOString()
-  };
-  const dataStr = JSON.stringify(backupData, null, 2);
-  const blob = new Blob([dataStr], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `jirawala_backup_${new Date().toISOString().split('T')[0]}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+    const data = { inventory, estimates, timestamp: Date.now() };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `jirawala_backup_${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
 };
 
-export const importBackup = (file: File): Promise<{inventory: InventoryItem[], estimates: EstimateRecord[]}> => {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const json = JSON.parse(e.target?.result as string);
-        let inv = [], est = [];
-        if (Array.isArray(json)) {
-            inv = json;
-        } else {
-            inv = json.inventory || [];
-            est = json.estimates || [];
-        }
-        
-        localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inv));
-        localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(est));
-        
-        if (inventoryListener) inventoryListener(inv);
-        if (estimatesListener) estimatesListener(est);
-        triggerAutoSync();
-        resolve({ inventory: inv, estimates: est });
-      } catch (err) {
-        reject(err);
-      }
-    };
-    reader.readAsText(file);
-  });
+export const importBackup = async (file: File): Promise<void> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            try {
+                const data = JSON.parse(e.target?.result as string);
+                if (Array.isArray(data.inventory) && Array.isArray(data.estimates)) {
+                    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(data.inventory));
+                    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(data.estimates));
+                    
+                    // Update listeners
+                    if(inventoryListener) inventoryListener(data.inventory);
+                    if(estimatesListener) estimatesListener(data.estimates);
+                    
+                    // Force Sync to Cloud
+                    await syncData();
+                    resolve();
+                } else {
+                    reject(new Error("Invalid backup format"));
+                }
+            } catch (err) {
+                reject(err);
+            }
+        };
+        reader.onerror = reject;
+        reader.readAsText(file);
+    });
 };
