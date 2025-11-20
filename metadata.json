@@ -1,0 +1,5 @@
+{
+  "name": "Jirawala Estimator",
+  "description": "AI-powered inventory management that parses PDF invoices and generates professional estimates with automated margin and tax calculations.",
+  "requestFramePermissions": []
+}
