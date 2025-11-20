@@ -26,6 +26,7 @@ let statusListener: ((status: SyncStatus, message: string) => void) | null = nul
 let inventoryListener: ((items: InventoryItem[]) => void) | null = null;
 let estimatesListener: ((items: EstimateRecord[]) => void) | null = null;
 let syncIntervalId: any = null;
+let isSyncing = false; // Prevent double syncs
 
 // --- Cloudflare Worker Code Template ---
 export const CLOUDFLARE_WORKER_CODE = `
@@ -36,39 +37,31 @@ export const CLOUDFLARE_WORKER_CODE = `
 
 export default {
   async fetch(request, env, ctx) {
-    // 1. CORS Headers (Allows your app to talk to this worker)
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization, Cache-Control, Pragma",
     };
 
-    // 2. Handle "OPTIONS" (The Browser checking if it's safe to connect)
     if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: corsHeaders,
-      });
+      return new Response(null, { headers: corsHeaders });
     }
 
-    // 3. Check if the Bucket (KV) is connected
     if (!env.STORE) {
         return new Response(
-            JSON.stringify({ error: "KV Namespace 'STORE' not bound. Go to Settings -> Variables in Cloudflare." }), 
+            JSON.stringify({ error: "KV Namespace 'STORE' not bound." }), 
             { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
     }
 
-    // 4. Check Password
     const authHeader = request.headers.get("Authorization");
     if (!authHeader || authHeader.length < 3) {
         return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // Create a unique filename based on the password (User Key)
     const KEY = \`user_\${authHeader.replace(/[^a-zA-Z0-9]/g, '')}\`; 
 
     try {
-      // --- GET: Read Data ---
       if (request.method === "GET") {
         const data = await env.STORE.get(KEY);
         const payload = data || JSON.stringify({ inventory: [], estimates: [], timestamp: 0 });
@@ -77,12 +70,11 @@ export default {
           headers: { 
             ...corsHeaders, 
             "Content-Type": "application/json",
-            "Cache-Control": "no-store, max-age=0" // Tell browser NOT to save an old copy
+            "Cache-Control": "no-store, max-age=0" 
           }
         });
       }
 
-      // --- PUT: Save Data ---
       if (request.method === "PUT") {
         const body = await request.json();
         await env.STORE.put(KEY, JSON.stringify(body));
@@ -135,6 +127,17 @@ window.addEventListener('storage', (e) => {
     }
 });
 
+// --- Visibility Listener (Sync on Tab Focus) ---
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        syncData();
+    }
+});
+
+window.addEventListener('focus', () => {
+    syncData();
+});
+
 // --- Sync Engine ---
 
 export const setCloudConfig = (url: string, token: string) => {
@@ -150,7 +153,6 @@ export const setCloudConfig = (url: string, token: string) => {
 
 export const getCloudConfigDetails = () => getCloudConfig();
 
-// CRITICAL: Generates a timestamp that is ALWAYS higher than the last known state.
 const touchLocalData = () => {
     const storedTS = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
     const now = Date.now();
@@ -161,13 +163,17 @@ const touchLocalData = () => {
 };
 
 export const syncData = async () => {
+    if (isSyncing) return;
+    
     const config = getCloudConfig();
     if (!config || !config.workerUrl) {
         notifyStatus('offline', 'Local Mode');
         return;
     }
 
-    notifyStatus('syncing', 'Syncing...');
+    isSyncing = true;
+    // Only show 'syncing' text if it takes longer than 500ms to avoid flickering
+    const spinnerTimeout = setTimeout(() => notifyStatus('syncing', 'Syncing...'), 500);
 
     try {
         // 1. Get Local State
@@ -176,22 +182,25 @@ export const syncData = async () => {
         const localTimestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
 
         // 2. Fetch Remote State
-        const response = await fetch(config.workerUrl, {
+        // CACHE BUSTING: We add ?t=Date.now() to force the browser to actually go to the internet
+        const bustCache = `?t=${Date.now()}`;
+        const fetchUrl = `${config.workerUrl}${bustCache}`;
+
+        const response = await fetch(fetchUrl, {
             method: 'GET',
-            cache: 'no-store', 
             headers: { 
                 'Authorization': config.accessToken,
-                'Cache-Control': 'no-cache'
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
             }
         });
 
         const contentType = response.headers.get("content-type");
         if (contentType && contentType.includes("text/html")) {
-            throw new Error("Incorrect URL: This URL returns a webpage. Make sure you are using the 'jirawala_data' Worker URL.");
+            throw new Error("Incorrect URL: This URL returns a webpage.");
         }
 
         if (!response.ok) {
-            // Try to read error text, but be safe if it fails
             let text = "Unknown Error";
             try { text = await response.text(); } catch(e) {}
             throw new Error(`Server Error: ${response.status} ${text}`);
@@ -217,9 +226,8 @@ export const syncData = async () => {
              // Local has newer data -> PUSH
              console.log(`[SYNC] Pushing. Local(${localTimestamp}) > Remote(${remoteTimestamp})`);
              await pushToCloud(config, inventory, estimates);
-             
+             notifyStatus('synced', 'Saved to Cloud');
         } else {
-             // Equal -> Assume synced
              notifyStatus('synced', 'Up to date');
         }
 
@@ -227,22 +235,23 @@ export const syncData = async () => {
         console.error("Sync failed", error);
         const msg = error instanceof Error ? error.message : "Unknown";
         let displayMsg = msg;
-        
-        if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed (Check URL)";
-        if (msg.includes("JSON")) displayMsg = "Invalid Data";
-        
+        if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed";
         notifyStatus('error', displayMsg);
+    } finally {
+        clearTimeout(spinnerTimeout);
+        isSyncing = false;
     }
 };
 
 const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], estimates: EstimateRecord[]) => {
-    // We read the TS again to be sure we are sending the latest decided stamp
     const timestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || Date.now().toString());
     const payload: SyncPayload = { inventory, estimates, timestamp };
 
-    const response = await fetch(config.workerUrl, {
+    // CACHE BUSTING for PUT as well
+    const bustCache = `?t=${Date.now()}`;
+    
+    const response = await fetch(`${config.workerUrl}${bustCache}`, {
         method: 'PUT',
-        cache: 'no-store',
         headers: { 
             'Authorization': config.accessToken,
             'Content-Type': 'application/json'
@@ -251,17 +260,16 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
     });
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    notifyStatus('synced', 'Saved to Cloud');
 };
 
 // --- Auto Sync Logic ---
 const startAutoSync = () => {
     if (syncIntervalId) clearInterval(syncIntervalId);
-    // Sync every 60 seconds
+    // ULTRA FAST SYNC: 4 seconds
     syncIntervalId = setInterval(() => {
         const config = getCloudConfig();
-        if (config?.workerUrl) syncData();
-    }, 60000);
+        if (config?.workerUrl && !isSyncing) syncData();
+    }, 4000);
 };
 
 // --- Public API ---
@@ -271,7 +279,6 @@ export const onSyncStatusChange = (cb: (status: SyncStatus, message: string) => 
     const config = getCloudConfig();
     if (config?.workerUrl) {
         notifyStatus('offline', 'Connecting...');
-        // Initial Sync on Load
         syncData();
         startAutoSync();
     } else {
@@ -293,7 +300,6 @@ export const subscribeToEstimates = (cb: (items: EstimateRecord[]) => void) => {
 
 export const addInventoryItem = async (item: InventoryItem) => {
     const inventory = getLocalInventory();
-    
     let idx = inventory.findIndex(i => i.id === item.id);
     
     if (idx === -1 && item.productName) {
@@ -311,24 +317,18 @@ export const addInventoryItem = async (item: InventoryItem) => {
     if(inventoryListener) inventoryListener(inventory);
     
     touchLocalData(); 
+    notifyStatus('syncing', 'Saving...');
     await syncData();
 };
 
 export const addInventoryBatch = async (items: InventoryItem[]) => {
     const inventory = getLocalInventory();
-    
     items.forEach(newItem => {
         if (!newItem.productName) return;
-
         const idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === newItem.productName.toLowerCase().trim());
-        
         if (idx >= 0) {
             const oldStock = inventory[idx].stock;
-            inventory[idx] = { 
-                ...newItem, 
-                id: inventory[idx].id, 
-                stock: oldStock + newItem.stock 
-            };
+            inventory[idx] = { ...newItem, id: inventory[idx].id, stock: oldStock + newItem.stock };
         } else {
             inventory.push(newItem);
         }
@@ -336,8 +336,8 @@ export const addInventoryBatch = async (items: InventoryItem[]) => {
 
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     if(inventoryListener) inventoryListener(inventory);
-    
     touchLocalData(); 
+    notifyStatus('syncing', 'Saving Batch...');
     await syncData();
 };
 
@@ -350,6 +350,7 @@ export const deleteInventoryItem = async (id: string) => {
         localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
         if(inventoryListener) inventoryListener(inventory);
         touchLocalData(); 
+        notifyStatus('syncing', 'Deleting...');
         await syncData();
     }
 };
@@ -364,6 +365,7 @@ export const deleteInventoryBatch = async (ids: string[]) => {
         localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
         if(inventoryListener) inventoryListener(inventory);
         touchLocalData(); 
+        notifyStatus('syncing', 'Deleting Batch...');
         await syncData();
     }
 };
@@ -384,6 +386,7 @@ export const updateInventoryStock = async (adjustments: {id: string, qtyChange: 
         localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
         if (inventoryListener) inventoryListener(inventory);
         touchLocalData(); 
+        notifyStatus('syncing', 'Updating Stock...');
         await syncData(); 
     }
 };
@@ -399,6 +402,7 @@ export const saveEstimateRecord = async (record: EstimateRecord) => {
     if(estimatesListener) estimatesListener(estimates);
     
     touchLocalData(); 
+    notifyStatus('syncing', 'Saving Order...');
     await syncData();
 };
 
@@ -411,6 +415,7 @@ export const deleteEstimateRecord = async (id: string) => {
         localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
         if(estimatesListener) estimatesListener(estimates);
         touchLocalData(); 
+        notifyStatus('syncing', 'Deleting Order...');
         await syncData();
     }
 };
@@ -427,6 +432,7 @@ export const updateEstimatePaymentStatus = async (id: string, status: PaymentSta
     if (estimatesListener) estimatesListener(estimates);
     
     touchLocalData();
+    notifyStatus('syncing', 'Updating Status...');
     await syncData();
 };
 
@@ -436,7 +442,6 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
     if (targetIdx === -1) return;
 
     const targetEst = estimates[targetIdx];
-    
     const getCustKey = (c: CustomerProfile) => (c.firmName || c.name || '').toLowerCase().trim() + (c.phone || '').trim();
     const targetCustKey = getCustKey(targetEst.customer);
 
@@ -517,6 +522,7 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if (estimatesListener) estimatesListener(estimates);
     touchLocalData(); 
+    notifyStatus('syncing', 'Saving Payment...');
     await syncData();
 };
 
