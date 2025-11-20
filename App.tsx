@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, 
@@ -35,7 +36,8 @@ import {
   Globe,
   Key,
   RefreshCw,
-  Smartphone
+  Smartphone,
+  RotateCcw
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus } from './types';
 import { parseInvoicePDF } from './services/geminiService';
@@ -57,6 +59,19 @@ import {
     syncData
 } from './services/storageService';
 import { generateEstimatePDF } from './services/pdfService';
+
+// Simple helper for UI display
+const numberToWordsSimple = (num: number): string => {
+    const format = new Intl.NumberFormat('en-IN', {
+        style: 'currency',
+        currency: 'INR',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+    });
+    // We'll rely on the PDF service for the full "One Lakh..." conversion
+    // This UI helper just formats the number nicely
+    return format.format(num);
+};
 
 function App() {
   // --- State ---
@@ -223,10 +238,11 @@ function App() {
 
         await addInventoryBatch(newItems);
         setIsProcessing(false);
+        alert(`Successfully extracted ${newItems.length} items!`);
       };
       reader.readAsDataURL(file);
     } catch (error) {
-      alert("Failed to parse PDF");
+      alert("Failed to parse PDF. Please try a clearer file.");
       setIsProcessing(false);
     }
   };
@@ -284,7 +300,7 @@ function App() {
     if (e.target.files?.[0]) {
         try {
             await importBackup(e.target.files[0]);
-            alert("Restored!");
+            alert("Database Restored!");
         } catch(err) {
             alert("Invalid backup file");
         }
@@ -336,13 +352,8 @@ function App() {
     const finalUnitPrice = item.sellingBasic + gstAmount;
     const totalFinalPrice = finalUnitPrice * item.quantity;
     
-    let customerDiscountPercent = 0;
-    if (item.mrp > 0 && item.sellingBasic < item.mrp) {
-        customerDiscountPercent = ((item.mrp - item.sellingBasic) / item.mrp) * 100;
-    }
-
     const totalProfit = (item.sellingBasic - item.landingPrice) * item.quantity;
-    return { gstAmount, finalUnitPrice, totalFinalPrice, customerDiscountPercent, totalProfit };
+    return { gstAmount, finalUnitPrice, totalFinalPrice, totalProfit };
   };
 
   const subTotal = estimateItems.reduce((acc, item) => acc + calculateRow(item).totalFinalPrice, 0);
@@ -364,7 +375,6 @@ function App() {
       
       const prefix = `${firmPrefix}${namePrefix}`;
       
-      // Count invoices starting with this prefix
       const existingCount = estimates.filter(e => 
           e.invoiceNumber?.startsWith(prefix)
       ).length;
@@ -424,8 +434,8 @@ function App() {
           estimateItems, 
           businessProfile,
           additionalCharges,
-          !currentEst || currentEst.status === 'draft', // Draft if not confirmed
-          currentEst?.invoiceNumber // Pass invoice ID
+          !currentEst || currentEst.status === 'draft',
+          currentEst?.invoiceNumber
       );
   };
 
@@ -439,6 +449,7 @@ function App() {
   };
 
   const createNewEstimate = () => {
+      if (estimateItems.length > 0 && !confirm("Discard current estimate?")) return;
       setCustomerDetails({ name: '', firmName: '', phone: '', address: '', gstin: '' });
       setEstimateItems([]);
       setAdditionalCharges({ packing: 0, shipping: 0, adjustment: 0 });
@@ -658,6 +669,16 @@ function App() {
                         />
                      </div>
                    </div>
+                   <div>
+                        <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Terms & Conditions</label>
+                        <textarea 
+                           className="w-full border border-slate-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-primary/20 outline-none"
+                           rows={4}
+                           placeholder="1. Goods once sold... (One per line)"
+                           value={businessProfile.terms}
+                           onChange={e => setBusinessProfile(p => ({...p, terms: e.target.value}))}
+                        />
+                   </div>
                </div>
              </div>
              <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 text-right shrink-0">
@@ -761,11 +782,11 @@ function App() {
                                 <p className="text-slate-500 text-sm">Add via PDF or Manually</p>
                             </div>
                             <div className={`px-3 py-1 rounded-full text-xs font-medium ${isProcessing ? 'bg-amber-100 text-amber-700 animate-pulse' : 'bg-slate-100 text-slate-600'}`}>
-                                {isProcessing ? 'Analyzing...' : 'Ready'}
+                                {isProcessing ? 'Analyzing Invoice...' : 'Ready'}
                             </div>
                         </div>
                         <div className="flex flex-col sm:flex-row gap-4">
-                            <label className="flex-1 flex flex-col items-center justify-center h-32 border-2 border-dashed border-slate-300 rounded-lg hover:border-primary hover:bg-slate-50 transition-all cursor-pointer group">
+                            <label className={`flex-1 flex flex-col items-center justify-center h-32 border-2 border-dashed border-slate-300 rounded-lg hover:border-primary hover:bg-slate-50 transition-all cursor-pointer group ${isProcessing ? 'opacity-50 pointer-events-none' : ''}`}>
                                 <input type="file" className="hidden" accept="application/pdf" onChange={handleFileUpload} disabled={isProcessing} />
                                 <Upload className="w-6 h-6 text-slate-400 group-hover:text-primary mb-2" />
                                 <span className="text-sm text-slate-500 font-medium">Upload Invoice PDF</span>
@@ -974,7 +995,7 @@ function App() {
                            ) : (
                                <span className="bg-slate-100 text-slate-600 text-xs font-bold px-2 py-1 rounded">NEW ESTIMATE</span>
                            )}
-                           <button onClick={createNewEstimate} className="text-xs text-primary underline hover:text-blue-800 ml-2">Reset</button>
+                           <button onClick={createNewEstimate} className="text-xs text-primary hover:text-blue-800 ml-2 flex items-center gap-1"><RotateCcw className="w-3 h-3"/> Reset</button>
                         </div>
                         <div className="flex gap-2 w-full sm:w-auto">
                            <button 
@@ -1283,6 +1304,7 @@ function App() {
                                     <div className="pt-2 border-t border-slate-300">
                                         <div className="text-sm text-slate-900 font-bold mb-1 flex items-center justify-between md:justify-end gap-2">Grand Total <Pencil className="w-3 h-3 text-slate-400" /></div>
                                         <div className="flex items-center justify-between md:justify-end gap-1"><span className="text-2xl font-bold text-slate-900">₹</span><input type="number" className="w-32 text-3xl font-bold text-slate-900 bg-transparent border-b-2 border-dashed border-slate-300 focus:border-primary focus:outline-none text-right" value={grandTotal.toFixed(0)} onChange={e => handleGrandTotalChange(parseFloat(e.target.value) || 0)} /></div>
+                                        <div className="text-xs text-slate-500 mt-1 italic text-right">{numberToWordsSimple(Math.round(grandTotal))}</div>
                                     </div>
                                 </div>
                             </div>

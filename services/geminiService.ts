@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { InventoryItem } from "../types";
 
@@ -12,18 +13,23 @@ export const parseInvoicePDF = async (base64Pdf: string): Promise<Partial<Invent
   const model = "gemini-2.5-flash";
 
   const prompt = `
-    Analyze this PDF invoice/purchase order. 
-    Extract the list of items purchased.
+    Analyze this PDF invoice/purchase order (likely Indian GST format). 
+    Extract the list of line items purchased. 
+    
+    IMPORTANT RULES:
+    - If the invoice has multiple quantities for an item, extract the UNIT price, not the total line amount.
+    - Look for "HSN/SAC" code if available, put it in the product name or notes.
+    
     For each item, extract:
-    - Product Name
-    - Vendor Name (from the header/sender)
-    - Date of Invoice (YYYY-MM-DD)
-    - MRP (Maximum Retail Price per unit). If not explicitly stated, estimate or look for "Rate" and assume it might be MRP if high, otherwise use 0.
-    - Purchase Discount Percentage (the discount given by vendor to buyer).
-    - GST Percentage (tax rate).
-    - Landing Price (The final basic unit cost after discount but BEFORE tax, or if the document lists a "Net Rate" use that).
+    - Product Name: Full description.
+    - Vendor Name: Sender/Supplier name from header.
+    - Date: Invoice Date (YYYY-MM-DD).
+    - MRP: Maximum Retail Price per unit. If not listed, check if there is a "Rate" column that seems higher than the Net Rate. If MRP is unknown, set to 0.
+    - Purchase Discount Percentage: The discount % given by vendor to buyer on this invoice.
+    - GST Percentage: The tax rate (e.g., 18, 12, 28, 5). Look for CGST+SGST or IGST columns.
+    - Landing Price: The final effective BASIC UNIT COST to the buyer (After discount, BEFORE tax). If the invoice lists a "Net Rate" or "Basic Rate", use that. 
 
-    Return a JSON array.
+    Return a clean JSON array.
   `;
 
   try {

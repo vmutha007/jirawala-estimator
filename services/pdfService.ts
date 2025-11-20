@@ -3,6 +3,39 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { EstimateItem, BusinessProfile, CustomerProfile } from '../types';
 
+const numberToWords = (num: number): string => {
+  const a = [
+    '', 'One ', 'Two ', 'Three ', 'Four ', 'Five ', 'Six ', 'Seven ', 'Eight ', 'Nine ', 'Ten ', 
+    'Eleven ', 'Twelve ', 'Thirteen ', 'Fourteen ', 'Fifteen ', 'Sixteen ', 'Seventeen ', 'Eighteen ', 'Nineteen '
+  ];
+  const b = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+  const inWords = (n: number): string => {
+    if ((n = n.toString() as any).length > 9) return 'overflow';
+    const n_array: any = ('000000000' + n).substr(-9).match(/^(\d{2})(\d{2})(\d{2})(\d{1})(\d{2})$/);
+    if (!n_array) return ''; 
+    let str = '';
+    str += (n_array[1] != 0) ? (a[Number(n_array[1])] || b[n_array[1][0]] + ' ' + a[n_array[1][1]]) + 'Crore ' : '';
+    str += (n_array[2] != 0) ? (a[Number(n_array[2])] || b[n_array[2][0]] + ' ' + a[n_array[2][1]]) + 'Lakh ' : '';
+    str += (n_array[3] != 0) ? (a[Number(n_array[3])] || b[n_array[3][0]] + ' ' + a[n_array[3][1]]) + 'Thousand ' : '';
+    str += (n_array[4] != 0) ? (a[Number(n_array[4])] || b[n_array[4][0]] + ' ' + a[n_array[4][1]]) + 'Hundred ' : '';
+    str += (n_array[5] != 0) ? ((str != '') ? 'and ' : '') + (a[Number(n_array[5])] || b[n_array[5][0]] + ' ' + a[n_array[5][1]]) + '' : '';
+    return str;
+  };
+
+  const parts = num.toString().split('.');
+  let output = inWords(Number(parts[0])) + 'Rupees Only';
+  
+  if (parts[1]) {
+    const paise = parseInt(parts[1].padEnd(2, '0').substring(0, 2));
+    if (paise > 0) {
+        output = inWords(Number(parts[0])) + 'Rupees and ' + inWords(paise) + 'Paise Only';
+    }
+  }
+  
+  return output;
+};
+
 export const generateEstimatePDF = (
     customer: CustomerProfile, 
     items: EstimateItem[], 
@@ -16,47 +49,46 @@ export const generateEstimatePDF = (
   const pageHeight = doc.internal.pageSize.height;
 
   // Colors
-  const primaryColor = [30, 64, 175]; // Dark Blue
+  const primaryColor = [37, 99, 235]; // Blue 600
+  const slateColor = [71, 85, 105]; // Slate 600
 
   // --- Background Accents ---
-  // Top color bar
   doc.setFillColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-  doc.rect(0, 0, pageWidth, 4, 'F');
+  doc.rect(0, 0, pageWidth, 5, 'F');
 
-  // Watermark
+  // Watermark for Draft
   if (isDraft) {
       doc.setFontSize(80);
       doc.setTextColor(240, 240, 240);
       doc.setFont("helvetica", "bold");
-      // Cast to any to bypass strict TS check for withGraphicsState
       (doc as any).withGraphicsState({ opacity: 0.5 } as any, () => {
         doc.text("DRAFT", pageWidth / 2, pageHeight / 2, { align: 'center', angle: 45 });
       });
-      doc.setTextColor(0); // Reset
+      doc.setTextColor(0);
   }
 
   // --- Header Section ---
   let yPos = 20;
 
-  // Logo (Left)
+  // Logo
   if (business.logoUrl) {
     try {
-      doc.addImage(business.logoUrl, 'JPEG', 14, 14, 30, 30); 
+      doc.addImage(business.logoUrl, 'JPEG', 14, 14, 25, 25); 
     } catch (e) {
       console.error("Could not add logo", e);
     }
   }
 
-  // Company Info (Right)
+  // Company Info (Right Aligned)
   doc.setFont("helvetica", "bold");
   doc.setFontSize(20);
-  doc.setTextColor(30, 41, 59); // Slate 800
+  doc.setTextColor(15, 23, 42); // Slate 900
   doc.text(business.name || "Jirawala Estimator", pageWidth - 14, yPos, { align: "right" });
   yPos += 6;
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
-  doc.setTextColor(71, 85, 105); // Slate 600
+  doc.setTextColor(slateColor[0], slateColor[1], slateColor[2]);
   
   const addressLines = (business.address || "").split('\n');
   addressLines.forEach(line => {
@@ -68,70 +100,70 @@ export const generateEstimatePDF = (
   if (business.email) { doc.text(business.email, pageWidth - 14, yPos, { align: "right" }); yPos += 4; }
   if (business.gstin) { doc.text(`GSTIN: ${business.gstin}`, pageWidth - 14, yPos, { align: "right" }); yPos += 4; }
 
-  // --- Invoice Title & Dates ---
+  // --- Document Title & Dates ---
   yPos = Math.max(yPos, 50) + 10;
   
-  // Title
   doc.setFont("helvetica", "bold");
   doc.setFontSize(24);
   doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
   doc.text(isDraft ? "QUOTATION" : "TAX INVOICE", 14, yPos);
 
-  // Invoice # and Date Info
+  // Metadata (Right side of title)
   doc.setFontSize(10);
   doc.setTextColor(71, 85, 105);
   doc.setFont("helvetica", "bold");
   
-  let metaY = yPos;
+  let metaY = yPos - 5;
   if (!isDraft && invoiceNumber) {
-      doc.text("Invoice No:", pageWidth - 50, metaY);
+      doc.text("Invoice No:", pageWidth - 60, metaY);
       doc.setFont("helvetica", "normal");
       doc.text(invoiceNumber, pageWidth - 14, metaY, { align: "right" });
       metaY += 5;
       doc.setFont("helvetica", "bold");
   }
 
-  doc.text("Date:", pageWidth - 50, metaY);
+  doc.text("Date:", pageWidth - 60, metaY);
   doc.setFont("helvetica", "normal");
-  doc.text(new Date().toLocaleDateString(), pageWidth - 14, metaY, { align: "right" });
+  doc.text(new Date().toLocaleDateString('en-IN'), pageWidth - 14, metaY, { align: "right" });
 
-  yPos += 10;
+  yPos += 12;
 
-  // --- Bill To Section ---
-  doc.setDrawColor(226, 232, 240); // Border color
-  doc.setFillColor(248, 250, 252); // Background
-  doc.rect(14, yPos, pageWidth - 28, 35, 'F');
-  doc.rect(14, yPos, pageWidth - 28, 35, 'S');
+  // --- Bill To Box ---
+  doc.setDrawColor(226, 232, 240);
+  doc.setFillColor(248, 250, 252);
+  doc.rect(14, yPos, pageWidth - 28, 36, 'F');
+  doc.rect(14, yPos, pageWidth - 28, 36, 'S');
 
-  // Label
   doc.setFontSize(8);
   doc.setTextColor(100, 116, 139);
   doc.setFont("helvetica", "bold");
-  doc.text("BILL TO", 20, yPos + 6);
+  doc.text("BILL TO", 20, yPos + 8);
 
-  // Customer Details
+  // Customer Name/Firm
   doc.setFontSize(11);
   doc.setTextColor(15, 23, 42);
-  doc.text(customer.firmName ? customer.firmName.toUpperCase() : customer.name, 20, yPos + 13);
+  doc.text(customer.firmName ? customer.firmName.toUpperCase() : customer.name, 20, yPos + 16);
   
-  doc.setFontSize(10);
+  // Customer Address
+  doc.setFontSize(9);
   doc.setFont("helvetica", "normal");
-  // If firm name exists, show person name below it, else show address
-  let detailsY = yPos + 18;
-  if (customer.firmName) {
+  doc.setTextColor(51, 65, 85);
+  
+  let detailsY = yPos + 21;
+  if (customer.firmName && customer.name) {
       doc.text(`Attn: ${customer.name}`, 20, detailsY);
-      detailsY += 5;
+      detailsY += 4;
   }
   
   if (customer.address) {
-      const custAddr = doc.splitTextToSize(customer.address, 100);
+      const custAddr = doc.splitTextToSize(customer.address, 110);
       doc.text(custAddr, 20, detailsY);
-      detailsY += (custAddr.length * 5);
   }
 
-  // Contact Info Column in Bill To
-  const col2X = 120;
-  let contactY = yPos + 13;
+  // Customer Contact (Right side of box)
+  const col2X = 130;
+  let contactY = yPos + 16;
+  
   if (customer.phone) {
       doc.setFont("helvetica", "bold");
       doc.setFontSize(9);
@@ -154,7 +186,7 @@ export const generateEstimatePDF = (
 
   yPos += 45;
 
-  // --- Table ---
+  // --- Item Table ---
   const tableBody = items.map((item, index) => {
     const sellingBasic = item.sellingBasic;
     const gstAmount = sellingBasic * (item.gstPercent / 100);
@@ -179,7 +211,7 @@ export const generateEstimatePDF = (
     ];
   });
 
-  // Calculation
+  // Calculations
   const subTotal = items.reduce((sum, item) => {
     const sellingBasic = item.sellingBasic;
     const gstAmount = sellingBasic * (item.gstPercent / 100);
@@ -188,7 +220,10 @@ export const generateEstimatePDF = (
 
   const grandTotal = subTotal + additionalCharges.packing + additionalCharges.shipping + additionalCharges.adjustment;
 
-  // Footer Rows Construction
+  // Amount in Words
+  const amountInWords = numberToWords(Math.round(grandTotal));
+
+  // Footer Rows
   const footRows: any[] = [];
   
   const addFootRow = (label: string, value: number, isBold: boolean = false) => {
@@ -200,7 +235,6 @@ export const generateEstimatePDF = (
      }
   };
 
-  // Subtotal
   footRows.push([
       { content: 'Sub Total', colSpan: 7, styles: { halign: 'right' as const } },
       { content: subTotal.toFixed(2) }
@@ -210,7 +244,6 @@ export const generateEstimatePDF = (
   addFootRow('Freight / Shipping', additionalCharges.shipping);
   addFootRow(additionalCharges.adjustment > 0 ? 'Surcharge' : 'Adjustment', additionalCharges.adjustment);
   
-  // Grand Total with Emphasis
   footRows.push([
     { 
         content: 'GRAND TOTAL', 
@@ -219,8 +252,8 @@ export const generateEstimatePDF = (
             halign: 'right', 
             fontStyle: 'bold', 
             fillColor: [241, 245, 249], 
-            textColor: [30, 64, 175], 
-            fontSize: 12 
+            textColor: [37, 99, 235], 
+            fontSize: 11 
         } 
     }, 
     { 
@@ -228,10 +261,25 @@ export const generateEstimatePDF = (
         styles: { 
             fontStyle: 'bold', 
             fillColor: [241, 245, 249], 
-            textColor: [30, 64, 175], 
-            fontSize: 12 
+            textColor: [37, 99, 235], 
+            fontSize: 11 
         } 
     }
+  ]);
+
+  // Add Amount in Words row
+  footRows.push([
+      { 
+          content: `Amount in Words:\n${amountInWords}`, 
+          colSpan: 8, 
+          styles: { 
+              halign: 'left', 
+              fontStyle: 'italic', 
+              textColor: [100, 116, 139],
+              fontSize: 9,
+              cellPadding: 3
+          } 
+      }
   ]);
 
   autoTable(doc, {
@@ -248,7 +296,7 @@ export const generateEstimatePDF = (
         textColor: [51, 65, 85]
     },
     headStyles: { 
-        fillColor: [248, 250, 252], 
+        fillColor: [241, 245, 249], 
         textColor: [71, 85, 105], 
         fontStyle: 'bold',
         lineWidth: 0
@@ -259,7 +307,7 @@ export const generateEstimatePDF = (
     },
     columnStyles: {
         0: { cellWidth: 10, halign: 'center' },
-        1: { cellWidth: 'auto' }, // Description
+        1: { cellWidth: 'auto' }, 
         2: { cellWidth: 15, halign: 'center' },
         3: { cellWidth: 20, halign: 'right' },
         4: { cellWidth: 15, halign: 'right' },
@@ -274,10 +322,10 @@ export const generateEstimatePDF = (
     }
   });
 
-  const finalY = (doc as any).lastAutoTable.finalY + 10;
+  const finalY = (doc as any).lastAutoTable.finalY + 15;
 
-  // --- Footer Terms ---
-  if (finalY > pageHeight - 50) {
+  // --- Terms & Footer ---
+  if (finalY > pageHeight - 60) {
       doc.addPage();
       yPos = 20;
   } else {
@@ -288,13 +336,14 @@ export const generateEstimatePDF = (
   doc.line(14, yPos, pageWidth - 14, yPos);
   yPos += 10;
 
-  doc.setFontSize(10);
+  // Terms
+  doc.setFontSize(9);
   doc.setTextColor(15, 23, 42);
   doc.setFont("helvetica", "bold");
   doc.text("Terms & Conditions:", 14, yPos);
   yPos += 6;
 
-  doc.setFontSize(9);
+  doc.setFontSize(8);
   doc.setTextColor(100, 116, 139);
   doc.setFont("helvetica", "normal");
   
@@ -306,17 +355,20 @@ export const generateEstimatePDF = (
 
   terms.forEach(term => {
     doc.text(term, 14, yPos);
-    yPos += 5;
+    yPos += 4;
   });
 
-  // Signature Area
-  doc.setFontSize(10);
+  // Signatory
+  const signY = Math.max(yPos, finalY);
+  doc.setFontSize(9);
   doc.setTextColor(15, 23, 42);
-  doc.text("For " + (business.name || "Jirawala Estimator"), pageWidth - 14, yPos, { align: "right" });
-  yPos += 20;
+  doc.setFont("helvetica", "bold");
+  doc.text("For " + (business.name || "Jirawala Estimator"), pageWidth - 14, signY, { align: "right" });
+  
   doc.setFontSize(8);
   doc.setTextColor(148, 163, 184);
-  doc.text("Authorized Signatory", pageWidth - 14, yPos, { align: "right" });
+  doc.setFont("helvetica", "normal");
+  doc.text("Authorized Signatory", pageWidth - 14, signY + 15, { align: "right" });
 
-  doc.save(`${isDraft ? 'DRAFT_' : invoiceNumber ? invoiceNumber + '_' : 'ORDER_'}${customer.name.replace(/\s+/g, '_')}.pdf`);
+  doc.save(`${isDraft ? 'DRAFT_' : invoiceNumber ? invoiceNumber + '_' : 'ORDER_'}${customer.name.replace(/[^a-z0-9]/gi, '_')}.pdf`);
 };
