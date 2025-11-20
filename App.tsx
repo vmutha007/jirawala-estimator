@@ -49,9 +49,11 @@ import {
   IndianRupee,
   MessageCircle,
   Wallet,
-  Camera
+  Camera,
+  CreditCard,
+  Layers
 } from 'lucide-react';
-import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus } from './types';
+import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus, PaymentEntry } from './types';
 import { parseInvoiceDocument } from './services/geminiService';
 import { 
     subscribeToInventory, 
@@ -64,6 +66,7 @@ import {
     saveEstimateRecord,
     deleteEstimateRecord,
     updateEstimatePaymentStatus,
+    addPaymentToEstimate,
     exportBackup, 
     importBackup,
     onSyncStatusChange,
@@ -73,7 +76,7 @@ import {
     CLOUDFLARE_WORKER_CODE,
     syncData
 } from './services/storageService';
-import { generateEstimatePDF } from './services/pdfService';
+import { generateEstimatePDF, generateStatementPDF } from './services/pdfService';
 
 // Simple helper for UI display
 const numberToWordsSimple = (num: number): string => {
@@ -152,6 +155,7 @@ function App() {
       address: '',
       gstin: ''
   });
+  const [dueDate, setDueDate] = useState<string>(''); // State for new Due Date
   const [showCustomerExtras, setShowCustomerExtras] = useState(false);
 
   const [estimateItems, setEstimateItems] = useState<EstimateItem[]>([]);
@@ -166,6 +170,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [showSuggestions, setShowSuggestions] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Customer Autocomplete State
   const [showClientSuggestions, setShowClientSuggestions] = useState(false);
@@ -175,6 +180,18 @@ function App() {
   const [clientHistorySearch, setClientHistorySearch] = useState('');
   const [clientFilterDate, setClientFilterDate] = useState('');
   const [clientSort, setClientSort] = useState<'date_desc' | 'date_asc' | 'amt_desc' | 'amt_asc'>('date_desc');
+  
+  // Payment Modal State
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentData, setPaymentData] = useState<{ estId: string; amount: number; date: string; note: string }>({
+      estId: '',
+      amount: 0,
+      date: new Date().toISOString().split('T')[0],
+      note: ''
+  });
+  
+  // Floating Button State
+  const [fabOpen, setFabOpen] = useState(false);
 
   // --- Dashboard Stats ---
   const dashboardStats = useMemo(() => {
@@ -462,6 +479,28 @@ function App() {
     addToast("Item added to estimate", 'success');
   };
 
+  // Allows inserting a row at a specific index (e.g., after current row)
+  const handleInsertItem = (index: number) => {
+    const newItem: EstimateItem = {
+      id: crypto.randomUUID(),
+      inventoryId: undefined,
+      productName: "",
+      mrp: 0,
+      gstPercent: 18,
+      landingPrice: 0,
+      purchaseDiscountPercent: 0,
+      marginPercent: 20,
+      quantity: 1,
+      sellingBasic: 0,
+    };
+    
+    setEstimateItems(prev => {
+        const newList = [...prev];
+        newList.splice(index + 1, 0, newItem);
+        return newList;
+    });
+  };
+
   const updateItem = (id: string, updates: Partial<EstimateItem>) => {
     setEstimateItems(prev => prev.map(item => {
       if (item.id !== id) return item;
@@ -510,6 +549,18 @@ function App() {
       return `${prefix}${existingCount + 1}`;
   };
 
+  // --- CREATE NEW / RESET ---
+  const createNewEstimate = () => {
+      // Simple reset logic
+      setCustomerDetails({ name: '', firmName: '', phone: '', address: '', gstin: '' });
+      setEstimateItems([]);
+      setAdditionalCharges({ packing: 0, shipping: 0, adjustment: 0 });
+      setCurrentEstimateId(null);
+      setDueDate('');
+      setActiveTab('estimate');
+      addToast("New Estimate Started", 'info');
+  };
+
   // --- STOCK DEDUCTION LOGIC ---
   const handleSaveEstimate = async (status: EstimateStatus) => {
       if (!customerDetails.name) {
@@ -529,9 +580,12 @@ function App() {
       const newRecord: EstimateRecord = {
           id: currentEstimateId || crypto.randomUUID(),
           date: new Date().toISOString(),
+          dueDate: dueDate,
           lastModified: Date.now(),
           status,
           paymentStatus: 'unpaid', // Default for new
+          amountPaid: 0,
+          paymentHistory: [],
           invoiceNumber: invNum,
           customer: customerDetails,
           items: estimateItems,
@@ -570,13 +624,17 @@ function App() {
       }
 
       await saveEstimateRecord(newRecord);
-      setCurrentEstimateId(newRecord.id);
-
+      
+      // REFRESH Logic: Automatically clear the form for the next order
       if (status === 'confirmed') {
-         addToast(`Order Confirmed! Stock Updated. Invoice: ${invNum}`, 'success');
+         addToast(`Order Confirmed: ${invNum}. Screen cleared for next order.`, 'success');
       } else {
-         addToast("Draft Saved Successfully", 'success');
+         addToast("Draft Saved. Screen refreshed.", 'success');
       }
+      // Delay slightly to let the toast process, then clear
+      setTimeout(() => {
+          createNewEstimate();
+      }, 500);
   };
 
   const handleDeleteEstimate = async (id: string, e: React.MouseEvent) => {
@@ -616,25 +674,47 @@ function App() {
       setEstimateItems(record.items);
       setAdditionalCharges(record.additionalCharges || { packing: 0, shipping: 0, adjustment: 0 });
       setCurrentEstimateId(record.id);
+      setDueDate(record.dueDate || '');
       setActiveTab('estimate');
       setShowCustomerExtras(!!(record.customer.gstin || record.customer.address));
       addToast("Estimate Loaded", 'success');
   };
 
-  const createNewEstimate = () => {
-      if (estimateItems.length > 0 && !confirm("Discard current estimate?")) return;
-      setCustomerDetails({ name: '', firmName: '', phone: '', address: '', gstin: '' });
-      setEstimateItems([]);
-      setAdditionalCharges({ packing: 0, shipping: 0, adjustment: 0 });
-      setCurrentEstimateId(null);
-      setActiveTab('estimate');
-      addToast("New Estimate Started", 'info');
+  // --- Payment Logic ---
+  const handleOpenPaymentModal = (estId: string) => {
+      const est = estimates.find(e => e.id === estId);
+      if (!est) return;
+      
+      // Calculate remaining balance
+      const total = est.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) + est.additionalCharges.adjustment + est.additionalCharges.packing + est.additionalCharges.shipping;
+      const paid = est.paymentHistory ? est.paymentHistory.reduce((s, p) => s + p.amount, 0) : (est.amountPaid || 0);
+      const remaining = Math.max(0, total - paid);
+
+      setPaymentData({
+          estId,
+          amount: remaining,
+          date: new Date().toISOString().split('T')[0],
+          note: ''
+      });
+      setShowPaymentModal(true);
   };
 
-  const handlePaymentUpdate = async (e: React.ChangeEvent<HTMLSelectElement>, estId: string) => {
-      const newStatus = e.target.value as PaymentStatus;
-      await updateEstimatePaymentStatus(estId, newStatus);
-      addToast(`Payment marked as ${newStatus}`, 'success');
+  const handleSubmitPayment = async () => {
+      if (paymentData.amount <= 0) {
+          addToast("Amount must be greater than 0", 'error');
+          return;
+      }
+      
+      const entry: PaymentEntry = {
+          id: crypto.randomUUID(),
+          date: paymentData.date,
+          amount: paymentData.amount,
+          note: paymentData.note
+      };
+
+      await addPaymentToEstimate(paymentData.estId, entry);
+      setShowPaymentModal(false);
+      addToast("Payment Recorded & Allocated", 'success');
   };
 
   const openWhatsApp = (est: EstimateRecord, total: number) => {
@@ -645,11 +725,25 @@ function App() {
       
       const dateStr = new Date(est.date).toLocaleDateString();
       const statusText = est.paymentStatus === 'paid' ? 'PAID' : 'PENDING';
+      const paid = est.amountPaid || 0;
+      const balance = total - paid;
       
-      const msg = `Hello ${est.customer.name}, here are the details for your Invoice #${est.invoiceNumber} dated ${dateStr}.\n\nTotal Amount: ₹${total.toFixed(0)}\nStatus: ${statusText}\n\nThank you for your business!\n${businessProfile.name}`;
+      let msg = `Hello ${est.customer.name}, here are the details for your Invoice #${est.invoiceNumber} dated ${dateStr}.\n\nTotal Amount: ₹${total.toFixed(0)}\nPaid: ₹${paid.toFixed(0)}\nBalance Due: ₹${balance.toFixed(0)}\n\nStatus: ${statusText}\n\nThank you for your business!\n${businessProfile.name}`;
       
       const url = `https://wa.me/91${est.customer.phone.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(msg)}`;
       window.open(url, '_blank');
+  };
+
+  const handleDownloadStatement = (customerName: string) => {
+      // Find customer details
+      const custRecord = estimates.find(e => getUniqueKey(e.customer) === customerName);
+      if (!custRecord) return;
+
+      // Get all transactions for this customer
+      const transactions = estimates.filter(e => getUniqueKey(e.customer) === customerName);
+      
+      generateStatementPDF(custRecord.customer, transactions, businessProfile);
+      addToast("Statement Downloaded", 'success');
   };
 
   // --- Clients Logic ---
@@ -732,8 +826,23 @@ function App() {
       addToast("Sync triggered", 'info');
   };
 
+  // Quick scroll to top/search
+  const handleFabSearch = () => {
+      if (searchInputRef.current) {
+          searchInputRef.current.focus();
+          searchInputRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      setFabOpen(false);
+  };
+
+  const handleFabManual = () => {
+      addEstimateItem(); // Adds empty row
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      setFabOpen(false);
+  };
+
   return (
-    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-64">
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-64 relative">
       {/* Toast Container */}
       <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-[60] flex flex-col gap-2 items-center pointer-events-none w-full max-w-sm px-4">
           {toasts.map(t => (
@@ -752,6 +861,91 @@ function App() {
               </div>
           ))}
       </div>
+
+      {/* FLOATING ACTION BUTTON (Estimate Tab Only) */}
+      {activeTab === 'estimate' && (
+          <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-3">
+              {fabOpen && (
+                  <div className="flex flex-col gap-2 items-end animate-fade-in-up">
+                       <button 
+                           onClick={handleFabSearch}
+                           className="flex items-center gap-2 bg-white text-slate-700 px-4 py-2 rounded-full shadow-lg hover:bg-slate-50 font-medium border border-slate-100 transition"
+                       >
+                           <Search className="w-4 h-4 text-primary" /> Add from Stock
+                       </button>
+                       <button 
+                           onClick={handleFabManual}
+                           className="flex items-center gap-2 bg-white text-slate-700 px-4 py-2 rounded-full shadow-lg hover:bg-slate-50 font-medium border border-slate-100 transition"
+                       >
+                           <FilePlus className="w-4 h-4 text-emerald-600" /> Add Empty Row
+                       </button>
+                  </div>
+              )}
+              <button 
+                  onClick={() => setFabOpen(!fabOpen)}
+                  className={`w-14 h-14 rounded-full shadow-xl flex items-center justify-center transition-all duration-300 ${fabOpen ? 'bg-slate-700 rotate-45' : 'bg-primary hover:bg-blue-700'}`}
+              >
+                  <Plus className="w-8 h-8 text-white" />
+              </button>
+          </div>
+      )}
+
+      {/* Payment Modal */}
+      {showPaymentModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
+              <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
+                  <div className="bg-slate-100 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                      <h2 className="font-bold text-lg flex items-center gap-2">
+                          <CreditCard className="w-5 h-5 text-emerald-600" /> Record Payment
+                      </h2>
+                      <button onClick={() => setShowPaymentModal(false)} className="text-slate-500 hover:text-red-500 transition">
+                          <X className="w-5 h-5" />
+                      </button>
+                  </div>
+                  <div className="p-6 space-y-4">
+                      <div>
+                          <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Amount Received</label>
+                          <div className="relative">
+                              <span className="absolute left-3 top-2 text-slate-400 font-bold">₹</span>
+                              <input 
+                                  type="number" 
+                                  className="w-full pl-8 pr-3 py-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-emerald-500/20 outline-none font-bold text-lg text-emerald-700"
+                                  value={paymentData.amount}
+                                  onChange={e => setPaymentData(p => ({...p, amount: parseFloat(e.target.value) || 0}))}
+                                  autoFocus
+                              />
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-1">Excess amount will clear older invoices automatically.</p>
+                      </div>
+                      <div>
+                          <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Date</label>
+                          <input 
+                              type="date" 
+                              className="w-full px-3 py-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-emerald-500/20 outline-none"
+                              value={paymentData.date}
+                              onChange={e => setPaymentData(p => ({...p, date: e.target.value}))}
+                          />
+                      </div>
+                      <div>
+                          <label className="block text-xs font-semibold uppercase text-slate-500 mb-1">Note / Method</label>
+                          <input 
+                              type="text" 
+                              className="w-full px-3 py-2 border border-slate-300 rounded-md focus:ring-2 focus:ring-emerald-500/20 outline-none placeholder-slate-300"
+                              placeholder="e.g. UPI, Cash, Cheque #123"
+                              value={paymentData.note}
+                              onChange={e => setPaymentData(p => ({...p, note: e.target.value}))}
+                          />
+                      </div>
+                  </div>
+                  <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                      <button onClick={() => setShowPaymentModal(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-lg text-sm font-medium transition">Cancel</button>
+                      <button onClick={handleSubmitPayment} className="bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-emerald-700 transition">
+                          Save Payment
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
 
       {/* Settings Modal */}
       {showSettings && (
@@ -1250,15 +1444,13 @@ function App() {
                                     return acc;
                                 }, 0);
 
-                                const clientTotalDue = clientDocs.reduce((acc, doc) => {
-                                    if (doc.status === 'confirmed' && doc.paymentStatus !== 'paid') {
-                                         // Assuming full amount is due if not paid. 
-                                         // Future improvement: Subtract partial amounts if added to 'amountPaid'
-                                         const total = doc.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) + doc.additionalCharges.adjustment + doc.additionalCharges.packing + doc.additionalCharges.shipping;
-                                         return acc + total;
-                                    }
-                                    return acc;
+                                // Calculate total paid from history if available, else fallback
+                                const clientTotalPaid = clientDocs.reduce((acc, doc) => {
+                                     const paid = doc.paymentHistory ? doc.paymentHistory.reduce((s, p) => s + p.amount, 0) : (doc.amountPaid || 0);
+                                     return acc + paid;
                                 }, 0);
+
+                                const clientTotalDue = Math.max(0, clientTotalBusiness - clientTotalPaid);
 
                                 return (
                                     <div key={key} className="border border-slate-200 rounded-lg overflow-hidden">
@@ -1276,16 +1468,25 @@ function App() {
                                                 </div>
                                             </div>
                                             
-                                            <div className="flex items-center gap-4 w-full md:w-auto bg-white border border-slate-200 rounded-lg px-3 py-1.5 shadow-sm">
-                                                <div className="text-right">
-                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Total Business</div>
-                                                    <div className="text-sm font-bold text-slate-700">₹{numberToWordsSimple(clientTotalBusiness)}</div>
-                                                </div>
-                                                <div className="h-8 w-px bg-slate-100"></div>
-                                                <div className="text-right">
-                                                    <div className="text-[10px] text-slate-400 uppercase font-bold">Total Due</div>
-                                                    <div className={`text-sm font-bold ${clientTotalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                                                        ₹{numberToWordsSimple(clientTotalDue)}
+                                            <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+                                                 <button 
+                                                    onClick={() => handleDownloadStatement(key)}
+                                                    className="flex items-center gap-1 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium transition shadow-sm"
+                                                 >
+                                                     <FileText className="w-3 h-3" /> Statement
+                                                 </button>
+                                                
+                                                 <div className="flex items-center gap-4 bg-white border border-slate-200 rounded-lg px-3 py-1.5 shadow-sm">
+                                                    <div className="text-right">
+                                                        <div className="text-[10px] text-slate-400 uppercase font-bold">Total Business</div>
+                                                        <div className="text-sm font-bold text-slate-700">{numberToWordsSimple(clientTotalBusiness)}</div>
+                                                    </div>
+                                                    <div className="h-8 w-px bg-slate-100"></div>
+                                                    <div className="text-right">
+                                                        <div className="text-[10px] text-slate-400 uppercase font-bold">Total Due</div>
+                                                        <div className={`text-sm font-bold ${clientTotalDue > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                                            {numberToWordsSimple(clientTotalDue)}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
@@ -1295,8 +1496,13 @@ function App() {
                                         <div className="divide-y divide-slate-100">
                                             {sortedDocs.map(doc => {
                                                 const docTotal = doc.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) + doc.additionalCharges.adjustment + doc.additionalCharges.packing + doc.additionalCharges.shipping;
+                                                const docPaid = doc.paymentHistory ? doc.paymentHistory.reduce((s, p) => s + p.amount, 0) : (doc.amountPaid || 0);
+                                                const docBalance = docTotal - docPaid;
                                                 const dateObj = new Date(doc.lastModified || doc.date);
                                                 
+                                                // Overdue Logic
+                                                const isOverdue = doc.dueDate && new Date(doc.dueDate) < new Date() && docBalance > 1;
+
                                                 return (
                                                     <div key={doc.id} className="px-4 py-3 flex flex-col sm:flex-row justify-between items-center gap-3 hover:bg-slate-50 transition group">
                                                         <div className="w-full sm:w-auto">
@@ -1307,37 +1513,50 @@ function App() {
                                                                 ) : (
                                                                     <span className="text-slate-500 italic">Draft</span>
                                                                 )}
-                                                                
+                                                                {isOverdue && (
+                                                                    <span className="ml-2 px-1.5 py-0.5 bg-red-100 text-red-600 text-[10px] font-bold rounded border border-red-200">OVERDUE</span>
+                                                                )}
                                                             </div>
-                                                            <div className="text-xs text-slate-500 flex flex-wrap gap-2 mt-1">
+                                                            <div className="text-xs text-slate-500 flex flex-wrap gap-2 mt-1 items-center">
                                                                 <span>{dateObj.toLocaleDateString()}</span>
                                                                 <span className="hidden sm:inline">•</span>
                                                                 <span>{doc.items.length} Items</span>
                                                                 <span className="hidden sm:inline">•</span>
-                                                                <span className="font-semibold text-slate-700">₹{docTotal.toFixed(0)}</span>
+                                                                <span className="font-semibold text-slate-700">Total: ₹{docTotal.toFixed(0)}</span>
+                                                                {doc.status === 'confirmed' && (
+                                                                    <>
+                                                                        <span className="hidden sm:inline">•</span>
+                                                                        <span className="text-emerald-600">Paid: ₹{docPaid.toFixed(0)}</span>
+                                                                        {doc.dueDate && (
+                                                                            <>
+                                                                                <span className="hidden sm:inline">•</span>
+                                                                                <span className={`${isOverdue ? 'text-red-600 font-bold' : 'text-slate-400'}`}>Due: {new Date(doc.dueDate).toLocaleDateString()}</span>
+                                                                            </>
+                                                                        )}
+                                                                    </>
+                                                                )}
                                                             </div>
                                                         </div>
                                                         
                                                         {/* Actions */}
                                                         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                                                            {/* Payment Status Dropdown */}
+                                                            {/* Balance Indicator */}
                                                             {doc.status === 'confirmed' && (
-                                                                <div className="relative">
-                                                                    <select 
-                                                                        value={doc.paymentStatus || 'unpaid'} 
-                                                                        onChange={(e) => handlePaymentUpdate(e, doc.id)}
-                                                                        className={`text-xs font-bold py-1 pl-2 pr-6 rounded border appearance-none cursor-pointer outline-none transition ${
-                                                                            doc.paymentStatus === 'paid' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                                                                            doc.paymentStatus === 'partial' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                                                                            'bg-red-50 text-red-700 border-red-200'
-                                                                        }`}
-                                                                    >
-                                                                        <option value="unpaid">Unpaid</option>
-                                                                        <option value="partial">Partial</option>
-                                                                        <option value="paid">Paid</option>
-                                                                    </select>
-                                                                    <Wallet className="w-3 h-3 absolute right-2 top-1.5 opacity-50 pointer-events-none" />
+                                                                <div className="text-right mr-2">
+                                                                    <div className="text-[10px] text-slate-400 uppercase">Balance</div>
+                                                                    <div className={`text-sm font-bold ${docBalance < 1 ? 'text-slate-300' : 'text-red-600'}`}>
+                                                                        {docBalance < 1 ? 'CLEARED' : `₹${docBalance.toFixed(0)}`}
+                                                                    </div>
                                                                 </div>
+                                                            )}
+
+                                                            {doc.status === 'confirmed' && docBalance > 1 && (
+                                                                <button 
+                                                                    onClick={() => handleOpenPaymentModal(doc.id)}
+                                                                    className="flex items-center gap-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-2 py-1.5 rounded-md text-xs font-bold transition border border-emerald-200"
+                                                                >
+                                                                    <Plus className="w-3 h-3" /> Pay
+                                                                </button>
                                                             )}
 
                                                             {/* WhatsApp Button */}
@@ -1487,6 +1706,17 @@ function App() {
                                                 onChange={e => setCustomerDetails(p => ({...p, address: e.target.value}))}
                                              />
                                          </div>
+                                         {/* DUE DATE INPUT */}
+                                         <div className="md:col-span-2 flex items-center gap-2 bg-white p-2 rounded border border-slate-200">
+                                             <Calendar className="w-4 h-4 text-slate-400" />
+                                             <label className="text-xs text-slate-500 font-semibold whitespace-nowrap">Payment Due Date:</label>
+                                             <input 
+                                                type="date" 
+                                                className="flex-1 bg-transparent outline-none text-sm text-slate-700"
+                                                value={dueDate}
+                                                onChange={e => setDueDate(e.target.value)}
+                                             />
+                                         </div>
                                      </div>
                                  )}
                              </div>
@@ -1536,6 +1766,7 @@ function App() {
                             <Search className="w-5 h-5 text-slate-400 ml-3" />
                             <input 
                                 type="text"
+                                ref={searchInputRef}
                                 className="w-full px-3 py-3 bg-transparent outline-none"
                                 placeholder="Type to search inventory..."
                                 value={searchTerm}
@@ -1602,7 +1833,7 @@ function App() {
                                     <th className="px-2 md:px-4 py-3 text-right w-28 min-w-[100px]">Basic Rate</th>
                                     <th className="px-2 md:px-4 py-3 text-right w-16 min-w-[60px]">GST %</th>
                                     <th className="px-2 md:px-4 py-3 text-right w-32 font-bold min-w-[100px]">Total</th>
-                                    <th className="px-2 md:px-4 py-3 w-8"></th>
+                                    <th className="px-2 md:px-4 py-3 w-24 text-center">Actions</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
@@ -1631,26 +1862,34 @@ function App() {
                                                         placeholder="Item Name"
                                                     />
                                                     {viewMode === 'editor' && (
-                                                        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1 text-[10px] text-slate-500 bg-slate-100/50 p-1.5 rounded border border-slate-100">
-                                                            <div className="flex items-center gap-1">
-                                                                <span className="uppercase tracking-wider font-semibold">MRP:</span>
-                                                                <input 
-                                                                  type="number" 
-                                                                  value={valOrEmpty(item.mrp)} 
-                                                                  onChange={(e) => updateItem(item.id, { mrp: parseFloat(e.target.value) || 0 })} 
-                                                                  className="w-14 bg-transparent border-b border-slate-300 text-slate-700 p-0 focus:outline-none focus:border-primary h-4" 
-                                                                />
+                                                        <div className="mt-1">
+                                                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-500 bg-slate-100/50 p-1.5 rounded border border-slate-100 w-fit">
+                                                                <div className="flex items-center gap-1">
+                                                                    <span className="uppercase tracking-wider font-semibold">MRP:</span>
+                                                                    <input 
+                                                                      type="number" 
+                                                                      value={valOrEmpty(item.mrp)} 
+                                                                      onChange={(e) => updateItem(item.id, { mrp: parseFloat(e.target.value) || 0 })} 
+                                                                      className="w-14 bg-transparent border-b border-slate-300 text-slate-700 p-0 focus:outline-none focus:border-primary h-4" 
+                                                                    />
+                                                                </div>
+                                                                <div className="w-px h-3 bg-slate-300 self-center"></div>
+                                                                <div className="flex items-center gap-1">
+                                                                    <span className="uppercase tracking-wider font-semibold text-emerald-600">Landing:</span>
+                                                                    <input 
+                                                                      type="number" 
+                                                                      value={valOrEmpty(item.landingPrice)} 
+                                                                      onChange={(e) => updateItem(item.id, { landingPrice: parseFloat(e.target.value) || 0 })} 
+                                                                      className="w-14 bg-transparent border-b border-slate-300 text-emerald-700 p-0 focus:outline-none focus:border-primary h-4" 
+                                                                    />
+                                                                </div>
                                                             </div>
-                                                            <div className="w-px h-3 bg-slate-300 self-center"></div>
-                                                            <div className="flex items-center gap-1">
-                                                                <span className="uppercase tracking-wider font-semibold text-emerald-600">Landing:</span>
-                                                                <input 
-                                                                  type="number" 
-                                                                  value={valOrEmpty(item.landingPrice)} 
-                                                                  onChange={(e) => updateItem(item.id, { landingPrice: parseFloat(e.target.value) || 0 })} 
-                                                                  className="w-14 bg-transparent border-b border-slate-300 text-emerald-700 p-0 focus:outline-none focus:border-primary h-4" 
-                                                                />
-                                                            </div>
+                                                            <button 
+                                                                onClick={() => handleInsertItem(idx)}
+                                                                className="mt-1 flex items-center gap-1 text-[10px] font-bold text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 px-1 py-0.5 rounded transition"
+                                                            >
+                                                                <Plus className="w-3 h-3" /> Add Item Below
+                                                            </button>
                                                         </div>
                                                     )}
                                                 </td>
@@ -1700,7 +1939,13 @@ function App() {
                                                 </td>
                                                 <td className="px-2 md:px-4 py-4 text-right font-bold text-slate-900 align-middle text-base md:text-lg">₹{calc.totalFinalPrice.toFixed(0)}</td>
                                                 <td className="px-2 md:px-4 py-4 text-center align-middle">
-                                                    <button onClick={() => setEstimateItems(prev => prev.filter(i => i.id !== item.id))} className="opacity-100 md:opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 transition"><Trash2 className="w-4 h-4" /></button>
+                                                    <button 
+                                                        onClick={() => setEstimateItems(prev => prev.filter(i => i.id !== item.id))} 
+                                                        className="text-slate-400 hover:text-red-500 transition p-1.5 rounded-lg hover:bg-red-50 opacity-100 md:opacity-0 group-hover:opacity-100"
+                                                        title="Delete Row"
+                                                    >
+                                                        <Trash2 className="w-4 h-4" />
+                                                    </button>
                                                 </td>
                                             </tr>
                                         );

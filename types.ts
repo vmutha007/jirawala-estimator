@@ -52,14 +52,23 @@ export interface CustomerProfile {
 export type EstimateStatus = 'draft' | 'confirmed';
 export type PaymentStatus = 'unpaid' | 'paid' | 'partial';
 
+export interface PaymentEntry {
+  id: string;
+  date: string;
+  amount: number;
+  note?: string;
+}
+
 export interface EstimateRecord {
   id: string;
   invoiceNumber?: string; // e.g. JIRVIR1
   date: string;
+  dueDate?: string; // New: Payment Due Date
   lastModified: number;
   status: EstimateStatus;
-  paymentStatus?: PaymentStatus; // New Field
-  amountPaid?: number; // New Field
+  paymentStatus?: PaymentStatus; 
+  amountPaid?: number; 
+  paymentHistory?: PaymentEntry[]; // New: Ledger of payments for this invoice
   customer: CustomerProfile;
   items: EstimateItem[];
   additionalCharges: {

@@ -79,6 +79,7 @@ const convertPdfToImage = async (file: File): Promise<string> => {
 
     if (!context) throw new Error("Canvas context failed");
 
+    // @ts-ignore
     await page.render({
         canvasContext: context,
         viewport: viewport

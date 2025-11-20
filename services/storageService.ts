@@ -1,5 +1,5 @@
 
-import { InventoryItem, EstimateRecord, PaymentStatus } from "../types";
+import { InventoryItem, EstimateRecord, PaymentStatus, PaymentEntry, CustomerProfile } from "../types";
 
 // --- Configuration Constants ---
 const STORAGE_KEY_INVENTORY = "jirawala_inventory_data";
@@ -38,7 +38,6 @@ export const CLOUDFLARE_WORKER_CODE = `
 
 export default {
   async fetch(request, env, ctx) {
-    // CORS Headers - allow any origin for simplicity in this private tool
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
@@ -143,7 +142,6 @@ export const syncData = async () => {
             headers: { 'Authorization': config.accessToken }
         });
 
-        // --- CRITICAL FIX: Check if response is HTML (User entered Wrong URL) ---
         const contentType = response.headers.get("content-type");
         if (contentType && contentType.includes("text/html")) {
             throw new Error("Incorrect URL: You entered the App URL instead of the Sync Worker URL.");
@@ -182,8 +180,6 @@ export const syncData = async () => {
         if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed (Check URL)";
         if (msg.includes("JSON")) displayMsg = "Invalid Server Response";
         if (msg.includes("HTTP 500")) displayMsg = "Worker Error (Check Binding)";
-        
-        // Pass through specific custom errors
         if (msg.includes("Incorrect URL")) displayMsg = msg;
 
         notifyStatus('error', displayMsg);
@@ -203,7 +199,6 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
         body: JSON.stringify(payload)
     });
 
-    // Check for HTML error pages
     const contentType = response.headers.get("content-type");
     if (contentType && contentType.includes("text/html")) {
         throw new Error("Incorrect URL: You entered the App URL instead of the Sync Worker URL.");
@@ -242,20 +237,20 @@ export const addInventoryItem = async (item: InventoryItem) => {
     // 1. Try to find by ID (Edit Mode)
     let idx = inventory.findIndex(i => i.id === item.id);
     
-    // 2. If not found by ID, check if duplicate name exists (to prevent duplicates and update latest)
+    // 2. If not found by ID, check if duplicate name exists
     if (idx === -1 && item.productName) {
         idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === item.productName.toLowerCase().trim());
     }
 
     if(idx >= 0) {
-        // Update existing item, but preserve its ID for reference integrity
-        const originalId = inventory[idx].id;
-        inventory[idx] = { ...item, id: originalId };
+        const oldItem = inventory[idx];
+        inventory[idx] = { ...item, id: oldItem.id };
     } else {
         inventory.push(item);
     }
     
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    
     if(inventoryListener) inventoryListener(inventory);
     await syncData();
 };
@@ -266,19 +261,23 @@ export const addInventoryBatch = async (items: InventoryItem[]) => {
     items.forEach(newItem => {
         if (!newItem.productName) return;
 
-        // Check for duplicates by name
         const idx = inventory.findIndex(i => i.productName.toLowerCase().trim() === newItem.productName.toLowerCase().trim());
         
         if (idx >= 0) {
-            // Replace existing item with latest data, preserving ID
-            const originalId = inventory[idx].id;
-            inventory[idx] = { ...newItem, id: originalId };
+            // Add stock to existing
+            const oldStock = inventory[idx].stock;
+            inventory[idx] = { 
+                ...newItem, 
+                id: inventory[idx].id, 
+                stock: oldStock + newItem.stock 
+            };
         } else {
             inventory.push(newItem);
         }
     });
 
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    
     if(inventoryListener) inventoryListener(inventory);
     await syncData();
 };
@@ -322,6 +321,7 @@ export const updateInventoryStock = async (adjustments: {id: string, qtyChange: 
 export const saveEstimateRecord = async (record: EstimateRecord) => {
     const estimates = getLocalEstimates();
     const idx = estimates.findIndex(e => e.id === record.id);
+    
     if(idx >= 0) estimates[idx] = record;
     else estimates.push(record);
     
@@ -338,19 +338,129 @@ export const deleteEstimateRecord = async (id: string) => {
     await syncData();
 };
 
-export const updateEstimatePaymentStatus = async (id: string, status: PaymentStatus, amountPaid?: number) => {
+export const updateEstimatePaymentStatus = async (id: string, status: PaymentStatus) => {
     const estimates = getLocalEstimates();
     const idx = estimates.findIndex(e => e.id === id);
     if (idx === -1) return;
     
     estimates[idx].paymentStatus = status;
-    if (amountPaid !== undefined) estimates[idx].amountPaid = amountPaid;
     estimates[idx].lastModified = Date.now();
     
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if (estimatesListener) estimatesListener(estimates);
     
     syncData();
+};
+
+// --- Smart Payment Allocation ---
+export const addPaymentToEstimate = async (targetEstId: string, payment: PaymentEntry) => {
+    const estimates = getLocalEstimates();
+    const targetIdx = estimates.findIndex(e => e.id === targetEstId);
+    if (targetIdx === -1) return;
+
+    const targetEst = estimates[targetIdx];
+    
+    // Helper to get customer key
+    const getCustKey = (c: CustomerProfile) => (c.firmName || c.name || '').toLowerCase().trim() + (c.phone || '').trim();
+    const targetCustKey = getCustKey(targetEst.customer);
+
+    // Get all confirmed estimates for this customer to distribute payment
+    // Map them to include their original index so we can update the main array correctly
+    const customerEstimatesIndices = estimates
+        .map((e, i) => ({ ...e, originalIndex: i }))
+        .filter(e => e.status === 'confirmed' && getCustKey(e.customer) === targetCustKey)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()); // Oldest first
+
+    let remainingAmount = payment.amount;
+    const userNote = payment.note ? `${payment.note} - ` : "";
+
+    // Helper to calculate due amount for any estimate
+    const calculateDue = (est: EstimateRecord) => {
+        const total = est.items.reduce((s, i) => s + (i.sellingBasic * (1 + i.gstPercent/100) * i.quantity), 0) 
+                        + est.additionalCharges.adjustment + est.additionalCharges.packing + est.additionalCharges.shipping;
+        // Use history if available, or fallback to amountPaid
+        const paid = est.paymentHistory ? est.paymentHistory.reduce((s, p) => s + p.amount, 0) : (est.amountPaid || 0);
+        return { total, paid, due: total - paid };
+    };
+
+    // Step 1: Pay the Target Invoice first (up to its due amount)
+    const targetStats = calculateDue(targetEst);
+    if (targetStats.due > 0) {
+        const pay = Math.min(targetStats.due, remainingAmount);
+        
+        // Only add if > 0 (though due > 0 check covers it mostly)
+        if (pay > 0) {
+            const newEntry = { 
+                ...payment, 
+                amount: pay, 
+                id: crypto.randomUUID(),
+                note: `${userNote}Inv#${targetEst.invoiceNumber || 'Ref'} Payment`
+            };
+            const est = estimates[targetIdx];
+            
+            est.paymentHistory = [...(est.paymentHistory || []), newEntry];
+            
+            // Update Status
+            const newStats = calculateDue(est); 
+            est.amountPaid = newStats.paid;
+            est.paymentStatus = newStats.paid >= newStats.total - 1 ? 'paid' : 'partial';
+            est.lastModified = Date.now();
+            
+            remainingAmount -= pay;
+        }
+    }
+
+    // Step 2: Distribute remaining amount to other unpaid invoices (Oldest First)
+    if (remainingAmount > 0) {
+        for (const otherEst of customerEstimatesIndices) {
+            if (otherEst.id === targetEst.id) continue; // Skip target, already handled
+
+            const stats = calculateDue(otherEst);
+            // Check if it has dues (tolerance of 1.0 for float issues)
+            if (stats.due > 1) {
+                const pay = Math.min(stats.due, remainingAmount);
+                const newEntry = { 
+                    ...payment, 
+                    amount: pay, 
+                    id: crypto.randomUUID(), 
+                    note: `${userNote}Cleared Inv#${otherEst.invoiceNumber || 'Old Dues'}`
+                };
+                
+                const realIndex = otherEst.originalIndex;
+                const est = estimates[realIndex];
+                
+                est.paymentHistory = [...(est.paymentHistory || []), newEntry];
+                est.amountPaid = (est.amountPaid || 0) + pay; // Simple addition here works as we just pushed history
+                est.paymentStatus = est.amountPaid >= stats.total - 1 ? 'paid' : 'partial';
+                est.lastModified = Date.now();
+
+                remainingAmount -= pay;
+                if (remainingAmount <= 0) break;
+            }
+        }
+    }
+
+    // Step 3: If there is STILL money left, put it back on the Target Invoice as "Advance"
+    if (remainingAmount > 0) {
+         const est = estimates[targetIdx];
+         const newEntry = { 
+             ...payment, 
+             amount: remainingAmount, 
+             id: crypto.randomUUID(),
+             note: `${userNote}Advance / Credit`
+         };
+         est.paymentHistory = [...(est.paymentHistory || []), newEntry];
+         
+         // Recalculate to update total paid
+         const newStats = calculateDue(est);
+         est.amountPaid = newStats.paid;
+         est.paymentStatus = 'paid'; // Definitely paid now
+         est.lastModified = Date.now();
+    }
+
+    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
+    if (estimatesListener) estimatesListener(estimates);
+    await syncData();
 };
 
 export const exportBackup = (inventory: InventoryItem[], estimates: EstimateRecord[]) => {
@@ -374,11 +484,9 @@ export const importBackup = async (file: File): Promise<void> => {
                     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(data.inventory));
                     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(data.estimates));
                     
-                    // Update listeners
                     if(inventoryListener) inventoryListener(data.inventory);
                     if(estimatesListener) estimatesListener(data.estimates);
                     
-                    // Force Sync to Cloud
                     await syncData();
                     resolve();
                 } else {
