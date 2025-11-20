@@ -5,6 +5,7 @@ import { InventoryItem, EstimateRecord, PaymentStatus, PaymentEntry, CustomerPro
 const STORAGE_KEY_INVENTORY = "jirawala_inventory_data";
 const STORAGE_KEY_ESTIMATES = "jirawala_estimates_data";
 const STORAGE_KEY_CONFIG = "jirawala_cloud_config";
+const STORAGE_KEY_LAST_SYNC = "jirawala_last_sync_ts";
 
 // --- Types ---
 export type SyncStatus = 'offline' | 'syncing' | 'synced' | 'error';
@@ -121,6 +122,17 @@ export const setCloudConfig = (url: string, token: string) => {
 
 export const getCloudConfigDetails = () => getCloudConfig();
 
+// Helper to force a push by updating the local timestamp
+const touchLocalData = () => {
+    const current = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
+    // CRITICAL FIX: 
+    // Ensure the new timestamp is STRICTLY greater than the last known sync timestamp.
+    // This handles clock skew where the device time might be behind the server time.
+    // We add 100ms to ensure it wins any race.
+    const next = Math.max(Date.now(), current + 100);
+    localStorage.setItem(STORAGE_KEY_LAST_SYNC, next.toString());
+};
+
 export const syncData = async () => {
     const config = getCloudConfig();
     if (!config || !config.workerUrl) {
@@ -134,7 +146,7 @@ export const syncData = async () => {
         // 1. Get Local
         const inventory = getLocalInventory();
         const estimates = getLocalEstimates();
-        const localTimestamp = parseInt(localStorage.getItem("jirawala_last_sync_ts") || "0");
+        const localTimestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
 
         // 2. Fetch Remote
         const response = await fetch(config.workerUrl, {
@@ -160,7 +172,7 @@ export const syncData = async () => {
             // Remote newer -> Pull
             localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(remoteData.inventory || []));
             localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(remoteData.estimates || []));
-            localStorage.setItem("jirawala_last_sync_ts", remoteData.timestamp.toString());
+            localStorage.setItem(STORAGE_KEY_LAST_SYNC, remoteData.timestamp.toString());
             
             if (inventoryListener) inventoryListener(remoteData.inventory || []);
             if (estimatesListener) estimatesListener(remoteData.estimates || []);
@@ -187,7 +199,8 @@ export const syncData = async () => {
 };
 
 const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], estimates: EstimateRecord[]) => {
-    const timestamp = Date.now();
+    // Use current local timestamp which we ensured is > last remote in touchLocalData
+    const timestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || Date.now().toString());
     const payload: SyncPayload = { inventory, estimates, timestamp };
 
     const response = await fetch(config.workerUrl, {
@@ -206,7 +219,6 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    localStorage.setItem("jirawala_last_sync_ts", timestamp.toString());
     notifyStatus('synced', 'Saved to Cloud');
 };
 
@@ -252,6 +264,7 @@ export const addInventoryItem = async (item: InventoryItem) => {
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
     if(inventoryListener) inventoryListener(inventory);
+    touchLocalData(); // Mark as dirty
     await syncData();
 };
 
@@ -279,6 +292,7 @@ export const addInventoryBatch = async (items: InventoryItem[]) => {
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
     
     if(inventoryListener) inventoryListener(inventory);
+    touchLocalData(); // Mark as dirty
     await syncData();
 };
 
@@ -286,7 +300,9 @@ export const deleteInventoryItem = async (id: string) => {
     let inventory = getLocalInventory();
     inventory = inventory.filter(i => i.id !== id);
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    
     if(inventoryListener) inventoryListener(inventory);
+    touchLocalData(); // Mark as dirty for sync
     await syncData();
 };
 
@@ -295,7 +311,9 @@ export const deleteInventoryBatch = async (ids: string[]) => {
     const idSet = new Set(ids);
     inventory = inventory.filter(i => !idSet.has(i.id));
     localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
+    
     if(inventoryListener) inventoryListener(inventory);
+    touchLocalData(); // Mark as dirty
     await syncData();
 };
 
@@ -314,7 +332,8 @@ export const updateInventoryStock = async (adjustments: {id: string, qtyChange: 
     if (changed) {
         localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(inventory));
         if (inventoryListener) inventoryListener(inventory);
-        syncData(); 
+        touchLocalData(); // Mark as dirty
+        await syncData(); 
     }
 };
 
@@ -327,6 +346,7 @@ export const saveEstimateRecord = async (record: EstimateRecord) => {
     
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if(estimatesListener) estimatesListener(estimates);
+    touchLocalData(); // Mark as dirty
     await syncData();
 };
 
@@ -334,7 +354,9 @@ export const deleteEstimateRecord = async (id: string) => {
     let estimates = getLocalEstimates();
     estimates = estimates.filter(e => e.id !== id);
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
+    
     if(estimatesListener) estimatesListener(estimates);
+    touchLocalData(); // Mark as dirty so sync sees the deletion!
     await syncData();
 };
 
@@ -349,7 +371,8 @@ export const updateEstimatePaymentStatus = async (id: string, status: PaymentSta
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if (estimatesListener) estimatesListener(estimates);
     
-    syncData();
+    touchLocalData();
+    await syncData();
 };
 
 // --- Smart Payment Allocation ---
@@ -460,6 +483,7 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
 
     localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(estimates));
     if (estimatesListener) estimatesListener(estimates);
+    touchLocalData(); // Mark as dirty
     await syncData();
 };
 
@@ -487,6 +511,7 @@ export const importBackup = async (file: File): Promise<void> => {
                     if(inventoryListener) inventoryListener(data.inventory);
                     if(estimatesListener) estimatesListener(data.estimates);
                     
+                    touchLocalData(); // Mark as dirty
                     await syncData();
                     resolve();
                 } else {

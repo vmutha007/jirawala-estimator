@@ -51,7 +51,8 @@ import {
   Wallet,
   Camera,
   CreditCard,
-  Layers
+  Layers,
+  Loader2
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus, PaymentEntry } from './types';
 import { parseInvoiceDocument } from './services/geminiService';
@@ -108,6 +109,9 @@ function App() {
   const [estimates, setEstimates] = useState<EstimateRecord[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState('');
+  
+  // Action Loading States
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   
   // Toast State
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -638,20 +642,35 @@ function App() {
   };
 
   const handleDeleteEstimate = async (id: string, e: React.MouseEvent) => {
+      e.preventDefault();
       e.stopPropagation();
+      
       if(confirm("Permanently delete this estimate/order? Stock will be restored if confirmed.")) {
-          // Restore stock if confirmed
-          const rec = estimates.find(r => r.id === id);
-          if (rec && rec.status === 'confirmed') {
-              const adjustments = rec.items
-                 .filter(i => i.inventoryId)
-                 .map(i => ({ id: i.inventoryId!, qtyChange: i.quantity }));
-              if(adjustments.length > 0) await updateInventoryStock(adjustments);
-          }
+          setDeletingIds(prev => new Set(prev).add(id));
+          try {
+              // Restore stock if confirmed
+              const rec = estimates.find(r => r.id === id);
+              if (rec && rec.status === 'confirmed') {
+                  const adjustments = rec.items
+                     .filter(i => i.inventoryId)
+                     .map(i => ({ id: i.inventoryId!, qtyChange: i.quantity }));
+                  if(adjustments.length > 0) await updateInventoryStock(adjustments);
+              }
 
-          await deleteEstimateRecord(id);
-          if(currentEstimateId === id) createNewEstimate();
-          addToast("Estimate Deleted", 'info');
+              await deleteEstimateRecord(id);
+              
+              if(currentEstimateId === id) createNewEstimate();
+              addToast("Estimate Deleted", 'info');
+          } catch (err) {
+              console.error(err);
+              addToast("Failed to delete estimate", 'error');
+          } finally {
+              setDeletingIds(prev => {
+                  const next = new Set(prev);
+                  next.delete(id);
+                  return next;
+              });
+          }
       }
   };
 
@@ -1020,7 +1039,7 @@ function App() {
                             placeholder="Jirawala Axis"
                             value={businessProfile.name}
                             onChange={e => setBusinessProfile(p => ({...p, name: e.target.value}))}
-                         />
+                        />
                       </div>
                    </div>
                    <div>
@@ -1539,7 +1558,7 @@ function App() {
                                                         </div>
                                                         
                                                         {/* Actions */}
-                                                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                                                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end relative z-10">
                                                             {/* Balance Indicator */}
                                                             {doc.status === 'confirmed' && (
                                                                 <div className="text-right mr-2">
@@ -1553,7 +1572,7 @@ function App() {
                                                             {doc.status === 'confirmed' && docBalance > 1 && (
                                                                 <button 
                                                                     onClick={() => handleOpenPaymentModal(doc.id)}
-                                                                    className="flex items-center gap-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-2 py-1.5 rounded-md text-xs font-bold transition border border-emerald-200"
+                                                                    className="flex items-center gap-1 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-2 py-1.5 rounded-md text-xs font-bold transition border border-emerald-200 relative z-20"
                                                                 >
                                                                     <Plus className="w-3 h-3" /> Pay
                                                                 </button>
@@ -1563,7 +1582,7 @@ function App() {
                                                             {doc.customer.phone && (
                                                                 <button 
                                                                     onClick={() => openWhatsApp(doc, docTotal)}
-                                                                    className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-md transition border border-transparent hover:border-emerald-200"
+                                                                    className="p-1.5 text-emerald-600 hover:bg-emerald-50 rounded-md transition border border-transparent hover:border-emerald-200 relative z-20"
                                                                     title="Share on WhatsApp"
                                                                 >
                                                                     <MessageCircle className="w-4 h-4" />
@@ -1574,16 +1593,17 @@ function App() {
 
                                                             <button 
                                                                 onClick={() => loadEstimateToEditor(doc)}
-                                                                className="text-xs bg-white border border-slate-200 hover:border-primary hover:text-primary px-3 py-1.5 rounded-md transition"
+                                                                className="text-xs bg-white border border-slate-200 hover:border-primary hover:text-primary px-3 py-1.5 rounded-md transition relative z-20"
                                                             >
                                                                 View
                                                             </button>
                                                             <button 
                                                                 onClick={(e) => handleDeleteEstimate(doc.id, e)}
-                                                                className="p-1.5 text-slate-400 hover:text-red-500 transition rounded-md hover:bg-red-50"
+                                                                disabled={deletingIds.has(doc.id)}
+                                                                className="p-1.5 text-slate-400 hover:text-red-500 transition rounded-md hover:bg-red-50 relative z-20 disabled:opacity-50"
                                                                 title="Delete Estimate"
                                                             >
-                                                                <Trash2 className="w-4 h-4" />
+                                                                {deletingIds.has(doc.id) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                                                             </button>
                                                         </div>
                                                     </div>

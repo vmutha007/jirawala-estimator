@@ -5,12 +5,12 @@ import { EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord } from '
 
 // --- THEME CONFIGURATION (Liceria Style) ---
 const THEME = {
-  BG_COLOR: [253, 251, 247], // Light Beige/Cream
-  ACCENT_COLOR: [200, 30, 30], // Bold Red
-  TEXT_MAIN: [20, 20, 20], // Near Black
+  BG_COLOR: [253, 251, 247], // Light Beige/Cream (#FDFBF7)
+  ACCENT_COLOR: [217, 37, 37], // Bold Red (#D92525)
+  TEXT_MAIN: [26, 26, 26], // Near Black
   TEXT_SEC: [80, 80, 80], // Dark Gray
-  BORDER_COLOR: [50, 50, 50], // Dark borders for grid
-  TABLE_HEAD_BG: [240, 235, 230], // Darker Beige for headers
+  BORDER_COLOR: [40, 40, 40], // Dark borders for grid
+  TABLE_HEAD_BG: [235, 230, 220], // Darker Beige for headers
 };
 
 const numberToWords = (num: number): string => {
@@ -72,106 +72,133 @@ const numberToWords = (num: number): string => {
 const setupPage = (doc: jsPDF) => {
     const w = doc.internal.pageSize.width;
     const h = doc.internal.pageSize.height;
+    // Draw Beige Background
     doc.setFillColor(THEME.BG_COLOR[0], THEME.BG_COLOR[1], THEME.BG_COLOR[2]);
     doc.rect(0, 0, w, h, 'F');
 };
 
 const drawHeader = (doc: jsPDF, business: BusinessProfile, title: string, meta: string[], customer: CustomerProfile, isDraft: boolean) => {
     const pageWidth = doc.internal.pageSize.width;
+    const margin = 15;
     
-    // 1. Main Title (Left, Huge, Red)
+    // --- 1. BRANDING SECTION (Right Aligned) ---
+    let topY = 15;
+    let logoHeight = 0;
+    
+    // Draw Logo if exists
+    if (business.logoUrl) {
+        try {
+            const imgProps = doc.getImageProperties(business.logoUrl);
+            const logoWidth = 30; // Fixed width 30mm
+            logoHeight = (imgProps.height * logoWidth) / imgProps.width;
+            doc.addImage(business.logoUrl, pageWidth - margin - logoWidth, topY, logoWidth, logoHeight);
+            topY += logoHeight + 5;
+        } catch (e) {
+            console.warn("Logo drawing failed", e);
+        }
+    } else {
+        topY += 10;
+    }
+
+    // Company Name (Below Logo or Top Right)
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(48);
+    doc.setFontSize(20);
     doc.setTextColor(THEME.ACCENT_COLOR[0], THEME.ACCENT_COLOR[1], THEME.ACCENT_COLOR[2]);
-    doc.text(title, 14, 35);
-
-    // 2. Company Name (Right, Large, Red)
-    doc.setFontSize(24);
-    doc.text(business.name || "Jirawala Axis", pageWidth - 14, 30, { align: "right" });
-
-    // 3. Company Info (Right, Gray)
+    doc.text(business.name || "Jirawala Axis", pageWidth - margin, topY, { align: "right" });
+    
+    // Company Address (Gray, Small)
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
     doc.setTextColor(THEME.TEXT_SEC[0], THEME.TEXT_SEC[1], THEME.TEXT_SEC[2]);
     
-    let yRight = 38;
+    let addrY = topY + 6;
     const addressLines = (business.address || "").split('\n');
     addressLines.forEach(line => {
-        doc.text(line, pageWidth - 14, yRight, { align: "right" });
-        yRight += 4;
+        doc.text(line, pageWidth - margin, addrY, { align: "right" });
+        addrY += 4;
     });
-    if(business.phone) { doc.text(business.phone, pageWidth - 14, yRight, { align: "right" }); yRight += 4; }
-    if(business.email) { doc.text(business.email, pageWidth - 14, yRight, { align: "right" }); yRight += 4; }
-    if(business.gstin) { doc.text(`GSTIN: ${business.gstin}`, pageWidth - 14, yRight, { align: "right" }); yRight += 4; }
+    
+    const contactParts = [];
+    if(business.phone) contactParts.push(business.phone);
+    if(business.email) contactParts.push(business.email);
+    if(contactParts.length > 0) {
+        doc.text(contactParts.join(' | '), pageWidth - margin, addrY, { align: "right" });
+        addrY += 4;
+    }
+    if(business.gstin) { 
+        doc.text(`GSTIN: ${business.gstin}`, pageWidth - margin, addrY, { align: "right" });
+        addrY += 4;
+    }
 
-    // 4. Meta Info (Left, Under Title)
-    let yLeft = 50;
+
+    // --- 2. TITLE SECTION (Top Left) ---
+    // Align title roughly with the logo area but on the left
+    let titleY = 25; 
+    
     doc.setFont("helvetica", "bold");
+    doc.setFontSize(42); // Massive Font
+    doc.setTextColor(THEME.ACCENT_COLOR[0], THEME.ACCENT_COLOR[1], THEME.ACCENT_COLOR[2]);
+    doc.text(title, margin, titleY);
+
+    // Meta Data (Invoice #, Date) below Title
+    let metaY = titleY + 12;
     doc.setFontSize(10);
     doc.setTextColor(THEME.TEXT_MAIN[0], THEME.TEXT_MAIN[1], THEME.TEXT_MAIN[2]);
     
     meta.forEach(line => {
         const parts = line.split(':');
         if (parts.length > 1) {
-             doc.text(`${parts[0]}:`, 14, yLeft);
-             doc.setFont("helvetica", "normal");
-             doc.text(parts[1], 45, yLeft);
-             doc.setFont("helvetica", "bold");
+            doc.setFont("helvetica", "bold");
+            doc.text(`${parts[0]}:`, margin, metaY);
+            doc.setFont("helvetica", "normal");
+            doc.text(parts[1], margin + 25, metaY);
         } else {
-             doc.text(line, 14, yLeft);
+            doc.text(line, margin, metaY);
         }
-        yLeft += 5;
+        metaY += 5;
     });
 
-    // 5. Bill To Section
-    const billY = Math.max(yLeft, yRight) + 15;
+
+    // --- 3. BILL TO SECTION ---
+    const sectionStart = Math.max(addrY, metaY) + 12;
     
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
-    doc.setTextColor(THEME.TEXT_MAIN[0], THEME.TEXT_MAIN[1], THEME.TEXT_MAIN[2]);
-    doc.text("Bill To:", 14, billY);
+    doc.setFontSize(10);
+    doc.setTextColor(THEME.TEXT_SEC[0], THEME.TEXT_SEC[1], THEME.TEXT_SEC[2]);
+    doc.text("BILL TO:", margin, sectionStart);
     
-    // Payment Method / Terms Header (Right Side)
-    doc.text("Terms / Notes:", pageWidth - 80, billY);
-
     doc.setFont("helvetica", "bold");
     doc.setFontSize(12);
-    doc.text(customer.firmName ? customer.firmName.toUpperCase() : customer.name.toUpperCase(), 14, billY + 6);
+    doc.setTextColor(THEME.TEXT_MAIN[0], THEME.TEXT_MAIN[1], THEME.TEXT_MAIN[2]);
+    doc.text(customer.firmName ? customer.firmName.toUpperCase() : customer.name.toUpperCase(), margin, sectionStart + 6);
     
     doc.setFont("helvetica", "normal");
     doc.setFontSize(10);
     doc.setTextColor(THEME.TEXT_SEC[0], THEME.TEXT_SEC[1], THEME.TEXT_SEC[2]);
     
-    let custY = billY + 11;
+    let custY = sectionStart + 11;
     if(customer.firmName && customer.name) {
-        doc.text(customer.name, 14, custY);
+        doc.text(customer.name, margin, custY);
         custY += 4;
     }
     if(customer.address) {
-        const lines = doc.splitTextToSize(customer.address, 80);
-        doc.text(lines, 14, custY);
+        const lines = doc.splitTextToSize(customer.address, 90);
+        doc.text(lines, margin, custY);
         custY += (lines.length * 4);
     }
-    if(customer.phone) { doc.text(`Ph: ${customer.phone}`, 14, custY); custY += 4; }
-    if(customer.gstin) { doc.text(`GSTIN: ${customer.gstin}`, 14, custY); }
+    if(customer.phone) { doc.text(`Ph: ${customer.phone}`, margin, custY); custY += 4; }
+    if(customer.gstin) { doc.text(`GSTIN: ${customer.gstin}`, margin, custY); custY += 4; }
 
-    // Right side content (Payment/Terms placeholder)
-    const termsY = billY + 6;
-    const terms = business.terms ? business.terms.split('\n').slice(0, 3) : ["Immediate Payment", "Non-refundable"];
-    terms.forEach((t, i) => {
-        doc.text(`• ${t}`, pageWidth - 80, termsY + (i*5));
-    });
-
-    // Watermark
+    // --- WATERMARK ---
     if (isDraft) {
         doc.setFontSize(80);
-        doc.setTextColor(240, 230, 230); 
+        doc.setTextColor(240, 235, 230); 
         doc.setFont("helvetica", "bold");
         const h = doc.internal.pageSize.height;
         doc.text("DRAFT", pageWidth / 2, h / 2, { align: 'center', angle: 45 });
     }
 
-    return Math.max(custY, termsY + 20) + 10;
+    return Math.max(custY, sectionStart + 15) + 10;
 };
 
 // --- MAIN INVOICE GENERATOR ---
@@ -192,7 +219,6 @@ export const generateEstimatePDF = (
   const meta = [
       `Invoice No : ${invoiceNumber || '---'}`,
       `Date       : ${dateStr}`,
-      // Add Due Date if needed in future
   ];
 
   let yPos = drawHeader(doc, business, title, meta, customer, isDraft);
@@ -204,7 +230,6 @@ export const generateEstimatePDF = (
     const finalUnitRate = sellingBasic + gstAmount;
     const total = finalUnitRate * item.quantity;
     
-    // Calculate discount % for display if selling < mrp
     let discText = "-";
     if (item.mrp > 0 && sellingBasic < item.mrp) {
         const d = ((item.mrp - sellingBasic) / item.mrp) * 100;
@@ -236,38 +261,40 @@ export const generateEstimatePDF = (
     startY: yPos,
     head: [['#', 'DESCRIPTION', 'QTY', 'MRP', 'DISC', 'RATE', 'GST', 'TOTAL']],
     body: tableBody,
-    theme: 'grid', // Bold grid style
+    theme: 'grid', 
     styles: {
         textColor: THEME.TEXT_MAIN,
         lineColor: THEME.BORDER_COLOR,
         lineWidth: 0.1,
         fontSize: 9,
-        cellPadding: 4,
-        valign: 'middle'
+        cellPadding: 4, // Comfortable padding
+        valign: 'middle',
+        font: 'helvetica'
     },
     headStyles: {
         fillColor: THEME.TABLE_HEAD_BG,
         textColor: THEME.TEXT_MAIN,
         fontStyle: 'bold',
         halign: 'center',
+        valign: 'middle',
         lineColor: THEME.BORDER_COLOR,
-        lineWidth: 0.1
+        lineWidth: 0.1,
+        minCellHeight: 10
     },
+    // Optimized Column Widths for better fit
     columnStyles: {
-        0: { halign: 'center', cellWidth: 12 },
-        1: { halign: 'left' },
-        2: { halign: 'center', cellWidth: 15 },
-        3: { halign: 'right', cellWidth: 20 },
-        4: { halign: 'center', cellWidth: 18 },
-        5: { halign: 'right', cellWidth: 25 },
-        6: { halign: 'center', cellWidth: 15 },
-        7: { halign: 'right', cellWidth: 30, fontStyle: 'bold' }
+        0: { halign: 'center', cellWidth: 8 }, // # (Reduced)
+        1: { halign: 'left' }, // Description (Auto width)
+        2: { halign: 'center', cellWidth: 14 }, // Qty (Increased for "100")
+        3: { halign: 'right', cellWidth: 20 }, // MRP (Increased)
+        4: { halign: 'center', cellWidth: 14 }, // Disc
+        5: { halign: 'right', cellWidth: 25 }, // Rate (Increased for big numbers)
+        6: { halign: 'center', cellWidth: 14 }, // GST
+        7: { halign: 'right', cellWidth: 30, fontStyle: 'bold' } // Total (Increased)
     },
+    margin: { left: 15, right: 15 },
     footStyles: {
-        fillColor: [255, 255, 255],
-        textColor: THEME.TEXT_MAIN,
-        lineColor: THEME.BORDER_COLOR,
-        lineWidth: 0.1
+        fillColor: THEME.BG_COLOR,
     }
   });
 
@@ -275,25 +302,24 @@ export const generateEstimatePDF = (
   const pageWidth = doc.internal.pageSize.width;
   const pageHeight = doc.internal.pageSize.height;
 
-  // --- Totals Section (Boxed on Right) ---
+  // --- Totals Section (Clean & Right Aligned) ---
   let totalY = finalY + 10;
   
-  // Check if page break needed
   if (totalY > pageHeight - 60) {
       doc.addPage();
       setupPage(doc);
       totalY = 20;
   }
 
-  const rightColX = pageWidth - 80;
+  const rightColX = pageWidth - 85;
   
-  // Helper to draw total row
-  const drawTotalRow = (label: string, value: string, isBold = false, isRed = false) => {
+  const drawTotalRow = (label: string, value: string, isBold = false, isRed = false, isLarge = false) => {
       doc.setFont("helvetica", isBold ? "bold" : "normal");
+      doc.setFontSize(isLarge ? 14 : 10);
       doc.setTextColor(isRed ? THEME.ACCENT_COLOR[0] : THEME.TEXT_MAIN[0], isRed ? THEME.ACCENT_COLOR[1] : THEME.TEXT_MAIN[1], isRed ? THEME.ACCENT_COLOR[2] : THEME.TEXT_MAIN[2]);
       doc.text(label, rightColX, totalY);
-      doc.text(value, pageWidth - 14, totalY, { align: 'right' });
-      totalY += 6;
+      doc.text(value, pageWidth - 15, totalY, { align: 'right' });
+      totalY += (isLarge ? 8 : 6);
   };
 
   doc.setFontSize(10);
@@ -302,49 +328,53 @@ export const generateEstimatePDF = (
   if(additionalCharges.shipping > 0) drawTotalRow("Shipping", `+${additionalCharges.shipping.toFixed(2)}`);
   if(additionalCharges.adjustment !== 0) drawTotalRow("Adjustment", `${additionalCharges.adjustment > 0 ? '+' : ''}${additionalCharges.adjustment.toFixed(2)}`);
   
-  // Grand Total Bar
+  // Grand Total Bar (Red Lines)
   totalY += 2;
   doc.setDrawColor(THEME.ACCENT_COLOR[0], THEME.ACCENT_COLOR[1], THEME.ACCENT_COLOR[2]);
   doc.setLineWidth(0.5);
-  doc.line(rightColX - 5, totalY - 5, pageWidth - 14, totalY - 5);
+  doc.line(rightColX - 5, totalY - 5, pageWidth - 15, totalY - 5);
   
-  doc.setFontSize(14);
-  drawTotalRow("GRAND TOTAL", grandTotal.toFixed(2), true, true);
+  drawTotalRow("GRAND TOTAL", grandTotal.toFixed(2), true, true, true);
   
-  doc.line(rightColX - 5, totalY - 4, pageWidth - 14, totalY - 4);
+  doc.line(rightColX - 5, totalY - 2, pageWidth - 15, totalY - 2);
 
   // Amount in Words (Left side)
   doc.setFontSize(9);
   doc.setTextColor(THEME.TEXT_SEC[0], THEME.TEXT_SEC[1], THEME.TEXT_SEC[2]);
   doc.setFont("helvetica", "italic");
-  doc.text("Amount in Words:", 14, finalY + 10);
+  doc.text("Amount in Words:", 15, finalY + 12);
+  
   doc.setFont("helvetica", "bold");
   doc.setTextColor(THEME.TEXT_MAIN[0], THEME.TEXT_MAIN[1], THEME.TEXT_MAIN[2]);
   const words = doc.splitTextToSize(amountInWords, 100);
-  doc.text(words, 14, finalY + 15);
+  doc.text(words, 15, finalY + 17);
 
   // --- Footer ---
-  const footerY = Math.max(totalY + 20, pageHeight - 40);
+  const footerY = Math.max(totalY + 25, pageHeight - 40);
   
+  // Signature
   doc.setFontSize(10);
   doc.setFont("helvetica", "bold");
-  doc.text("For " + business.name, pageWidth - 14, footerY, { align: "right" });
+  doc.text("For " + business.name, pageWidth - 15, footerY, { align: "right" });
   
-  // Signature Line
   doc.setLineWidth(0.2);
   doc.setDrawColor(THEME.TEXT_SEC[0], THEME.TEXT_SEC[1], THEME.TEXT_SEC[2]);
-  doc.line(pageWidth - 60, footerY + 25, pageWidth - 14, footerY + 25);
+  doc.line(pageWidth - 65, footerY + 25, pageWidth - 15, footerY + 25);
   doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
-  doc.text("Authorized Signatory", pageWidth - 14, footerY + 30, { align: "right" });
+  doc.text("Authorized Signatory", pageWidth - 15, footerY + 30, { align: "right" });
 
-  // Terms at very bottom left
+  // Terms
   if (business.terms) {
-      doc.text("Terms & Conditions:", 14, footerY + 10);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(THEME.TEXT_MAIN[0], THEME.TEXT_MAIN[1], THEME.TEXT_MAIN[2]);
+      doc.text("Terms & Conditions:", 15, footerY + 10);
+      
+      doc.setFont("helvetica", "normal");
       doc.setFontSize(7);
       doc.setTextColor(THEME.TEXT_SEC[0], THEME.TEXT_SEC[1], THEME.TEXT_SEC[2]);
-      const termLines = doc.splitTextToSize(business.terms, 120);
-      doc.text(termLines, 14, footerY + 15);
+      const termLines = doc.splitTextToSize(business.terms, 110);
+      doc.text(termLines, 15, footerY + 15);
   }
 
   const fileName = `${isDraft ? 'DRAFT_' : invoiceNumber ? invoiceNumber + '_' : 'ORDER_'}${customer.name.replace(/[^a-z0-9]/gi, '_')}.pdf`;
@@ -356,7 +386,7 @@ export const generateEstimatePDF = (
   }
 };
 
-// --- STATEMENT GENERATOR ---
+// --- STATEMENT GENERATOR (Aligned with Theme) ---
 export const generateStatementPDF = (
     customer: CustomerProfile,
     transactions: EstimateRecord[],
@@ -440,7 +470,8 @@ export const generateStatementPDF = (
             lineColor: THEME.BORDER_COLOR,
             lineWidth: 0.1,
             fontSize: 9,
-            cellPadding: 4
+            cellPadding: 4,
+            font: 'helvetica'
         },
         headStyles: {
             fillColor: THEME.TABLE_HEAD_BG,
@@ -451,9 +482,12 @@ export const generateStatementPDF = (
             lineWidth: 0.1
         },
         columnStyles: {
-            3: { halign: 'right', textColor: THEME.ACCENT_COLOR }, // Debit Red
-            4: { halign: 'right', textColor: [22, 163, 74] }, // Credit Green
-            5: { halign: 'right', fontStyle: 'bold' }
+            0: { cellWidth: 25 },
+            1: { cellWidth: 25 },
+            // Description auto
+            3: { halign: 'right', textColor: THEME.ACCENT_COLOR, cellWidth: 25 }, // Debit Red
+            4: { halign: 'right', textColor: [22, 163, 74], cellWidth: 25 }, // Credit Green
+            5: { halign: 'right', fontStyle: 'bold', cellWidth: 30 }
         }
     });
 
@@ -466,7 +500,7 @@ export const generateStatementPDF = (
     
     doc.setFontSize(14);
     doc.setTextColor(runningBalance > 0 ? THEME.ACCENT_COLOR[0] : 22, runningBalance > 0 ? THEME.ACCENT_COLOR[1] : 163, runningBalance > 0 ? THEME.ACCENT_COLOR[2] : 74);
-    doc.text(`${runningBalance.toFixed(2)}`, pageWidth - 14, finalY + 15, { align: "right" });
+    doc.text(`${runningBalance.toFixed(2)}`, pageWidth - 15, finalY + 15, { align: "right" });
 
     const fileName = `STATEMENT_${customer.name.replace(/[^a-z0-9]/gi, '_')}.pdf`;
     doc.save(fileName);
