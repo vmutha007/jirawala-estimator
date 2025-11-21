@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Upload, 
@@ -52,7 +51,9 @@ import {
   Camera,
   CreditCard,
   Layers,
-  Loader2
+  Loader2,
+  ArrowUpCircle,
+  ArrowDownCircle
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus, PaymentEntry } from './types';
 import { parseInvoiceDocument } from './services/geminiService';
@@ -75,7 +76,9 @@ import {
     setCloudConfig,
     getCloudConfigDetails,
     CLOUDFLARE_WORKER_CODE,
-    syncData
+    syncData,
+    forceUploadToCloud,
+    forceDownloadFromCloud
 } from './services/storageService';
 import { generateEstimatePDF, generateStatementPDF } from './services/pdfService';
 
@@ -315,6 +318,28 @@ function App() {
      }
      setShowSettings(false);
      addToast("Settings saved");
+  };
+
+  const handleForceUpload = async () => {
+      if(confirm("OVERWRITE CLOUD DATA? This will replace data on all other devices with the data on THIS device.")) {
+          try {
+              await forceUploadToCloud();
+              addToast("Force Upload Successful", 'success');
+          } catch(e) {
+              addToast("Force Upload Failed", 'error');
+          }
+      }
+  };
+
+  const handleForceDownload = async () => {
+      if(confirm("OVERWRITE LOCAL DATA? This will replace data on THIS device with data from the Cloud.")) {
+          try {
+              await forceDownloadFromCloud();
+              addToast("Force Download Successful", 'success');
+          } catch(e) {
+              addToast("Force Download Failed", 'error');
+          }
+      }
   };
 
   const copyWorkerCode = () => {
@@ -768,7 +793,8 @@ function App() {
 
   // --- Clients Logic ---
   const getUniqueKey = (c: CustomerProfile) => `${c.name}||${c.firmName}`;
-  const uniqueClientKeys = Array.from(new Set(estimates.map(e => getUniqueKey(e.customer)))).sort();
+  // Explicitly typing string[] to avoid 'unknown' type inference issues on 'key' usage later
+  const uniqueClientKeys: string[] = Array.from(new Set(estimates.map(e => getUniqueKey(e.customer)))).sort();
   
   const clientSuggestions = customerDetails.name ? estimates.filter(e => {
       const fullString = `${e.customer.name} ${e.customer.firmName} ${e.customer.phone}`.toLowerCase();
@@ -831,7 +857,7 @@ function App() {
   
   const getSyncTitle = () => {
        switch(syncStatus) {
-          case 'synced': return 'Synced with Cloudflare';
+          case 'synced': return 'Synced: ' + syncMessage;
           case 'syncing': return 'Syncing...';
           case 'error': return `Error: ${syncMessage}`; 
           default: return 'Local Mode (Configure Cloudflare in Settings)';
@@ -1019,7 +1045,30 @@ function App() {
                            </div>
                        </div>
                    </div>
+                   
+                   {/* Manual Sync Controls */}
+                   {cloudUrl && (
+                       <div className="mt-6 pt-4 border-t border-blue-200">
+                           <h4 className="text-xs font-bold text-blue-900 uppercase mb-2">Troubleshooting (Danger Zone)</h4>
+                           <div className="flex gap-3">
+                               <button 
+                                   onClick={handleForceUpload}
+                                   className="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-xs font-medium transition"
+                               >
+                                   <ArrowUpCircle className="w-4 h-4" /> Force Upload (Overwrite Cloud)
+                               </button>
+                               <button 
+                                   onClick={handleForceDownload}
+                                   className="flex-1 flex items-center justify-center gap-2 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 px-3 py-2 rounded text-xs font-medium transition"
+                               >
+                                   <ArrowDownCircle className="w-4 h-4" /> Force Download (Overwrite Local)
+                               </button>
+                           </div>
+                           <p className="text-[10px] text-blue-500 mt-2 text-center">Use these only if automatic sync isn't working as expected.</p>
+                       </div>
+                   )}
                </div>
+
                {/* Business Profile */}
                <div className="space-y-4">
                    <h3 className="font-bold text-slate-700 border-b border-slate-200 pb-2">Business Profile</h3>
@@ -1170,9 +1219,9 @@ function App() {
                 <button onClick={() => setActiveTab('clients')} className={`px-3 md:px-4 py-2 rounded-md text-sm font-medium transition-all whitespace-nowrap ${activeTab === 'clients' ? 'bg-white shadow text-primary' : 'text-slate-500 hover:text-slate-700'}`}>Clients</button>
             </div>
             <div className="h-6 w-px bg-slate-200 mx-1"></div>
-            <button onClick={handleSyncClick} className="flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 transition" title={getSyncTitle()}>
+            <button onClick={handleSyncClick} className="flex items-center gap-1 px-2 py-1 rounded hover:bg-slate-100 transition text-xs font-medium text-slate-600" title={getSyncTitle()}>
                  {getSyncIcon()}
-                 {syncStatus === 'error' && <span className="text-[10px] text-red-500 font-bold hidden sm:block">Error</span>}
+                 <span className="hidden sm:inline truncate max-w-[150px]">{syncMessage || 'Sync'}</span>
             </button>
             <button onClick={() => setShowSettings(true)} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition shrink-0" title="Settings">
                 <Settings className="w-5 h-5" />

@@ -32,61 +32,83 @@ let isSyncing = false; // Prevent double syncs
 export const CLOUDFLARE_WORKER_CODE = `
 /**
  * JIRAWALA DATA WORKER
- * PASTE THIS INTO 'jirawala_data' WORKER
+ * PASTE THIS INTO YOUR WORKER NAMED 'jirawala_data'
+ * 
+ * IMPORTANT:
+ * 1. Go to Settings -> Variables
+ * 2. Add a KV Namespace Binding
+ * 3. Variable Name: STORE
+ * 4. KV Namespace: Select your namespace
  */
 
 export default {
   async fetch(request, env, ctx) {
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, Cache-Control, Pragma",
-    };
-
+    // Handle CORS Preflight
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Max-Age": "86400",
+        },
+      });
     }
 
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "application/json",
+    };
+
+    // Check binding
     if (!env.STORE) {
         return new Response(
-            JSON.stringify({ error: "KV Namespace 'STORE' not bound." }), 
-            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+            JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound. Go to Worker Settings -> Variables." }), 
+            { status: 500, headers: corsHeaders }
         );
     }
 
+    // Auth Check
     const authHeader = request.headers.get("Authorization");
-    if (!authHeader || authHeader.length < 3) {
-        return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    if (!authHeader || authHeader.trim().length === 0) {
+        return new Response(JSON.stringify({ error: "Unauthorized: Missing Token" }), { status: 401, headers: corsHeaders });
     }
 
+    // Generate Key from Token (Simple alpha-numeric sanitization)
     const KEY = \`user_\${authHeader.replace(/[^a-zA-Z0-9]/g, '')}\`; 
 
     try {
       if (request.method === "GET") {
         const data = await env.STORE.get(KEY);
+        // Default empty state if new user
         const payload = data || JSON.stringify({ inventory: [], estimates: [], timestamp: 0 });
         
         return new Response(payload, {
           headers: { 
             ...corsHeaders, 
-            "Content-Type": "application/json",
-            "Cache-Control": "no-store, max-age=0" 
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0" 
           }
         });
       }
 
       if (request.method === "PUT") {
         const body = await request.json();
+        // Basic validation
+        if (!body || typeof body !== 'object') {
+             return new Response(JSON.stringify({ error: "Invalid Body" }), { status: 400, headers: corsHeaders });
+        }
+        
+        // Save to KV
         await env.STORE.put(KEY, JSON.stringify(body));
         
         return new Response(JSON.stringify({ success: true, ts: body.timestamp }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
+          headers: corsHeaders
         });
       }
       
       return new Response("Method not allowed", { status: 405, headers: corsHeaders });
     } catch (err) {
-      return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { ...corsHeaders } });
+      return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
     }
   },
 };
@@ -147,6 +169,9 @@ export const setCloudConfig = (url: string, token: string) => {
     }
     
     localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify({ workerUrl: cleanUrl, accessToken: token.trim() }));
+    
+    // DO NOT touch local data here, or we might overwrite cloud with empty data on a new device.
+    // Just start sync.
     startAutoSync();
     syncData(); 
 };
@@ -156,6 +181,7 @@ export const getCloudConfigDetails = () => getCloudConfig();
 const touchLocalData = () => {
     const storedTS = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
     const now = Date.now();
+    // Ensure we always move forward by at least 1ms
     const next = Math.max(now, storedTS + 1);
     
     localStorage.setItem(STORAGE_KEY_LAST_SYNC, next.toString());
@@ -172,13 +198,11 @@ export const syncData = async () => {
     }
 
     isSyncing = true;
-    // Only show 'syncing' text if it takes longer than 500ms to avoid flickering
+    // Only show 'syncing' text if it takes longer than 500ms to avoid flickering UI
     const spinnerTimeout = setTimeout(() => notifyStatus('syncing', 'Syncing...'), 500);
 
     try {
         // 1. Get Local State
-        const inventory = getLocalInventory();
-        const estimates = getLocalEstimates();
         const localTimestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || "0");
 
         // 2. Fetch Remote State
@@ -190,20 +214,24 @@ export const syncData = async () => {
             method: 'GET',
             headers: { 
                 'Authorization': config.accessToken,
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
+                'Cache-Control': 'no-cache'
             }
         });
 
         const contentType = response.headers.get("content-type");
         if (contentType && contentType.includes("text/html")) {
-            throw new Error("Incorrect URL: This URL returns a webpage.");
+            throw new Error("Incorrect URL: The Worker returned HTML instead of JSON. Check URL.");
         }
 
         if (!response.ok) {
             let text = "Unknown Error";
             try { text = await response.text(); } catch(e) {}
-            throw new Error(`Server Error: ${response.status} ${text}`);
+            // Extract friendly error from JSON if possible
+            try { 
+                const errObj = JSON.parse(text);
+                if (errObj.error) text = errObj.error;
+            } catch(e) {}
+            throw new Error(text);
         }
 
         const remoteData: SyncPayload = await response.json();
@@ -212,20 +240,14 @@ export const syncData = async () => {
         // 3. Compare and Act
         if (remoteTimestamp > localTimestamp) {
             // Cloud has newer data -> PULL
-            console.log(`[SYNC] Pulling. Remote(${remoteTimestamp}) > Local(${localTimestamp})`);
-            
-            localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(remoteData.inventory || []));
-            localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(remoteData.estimates || []));
-            localStorage.setItem(STORAGE_KEY_LAST_SYNC, remoteTimestamp.toString());
-            
-            if (inventoryListener) inventoryListener(remoteData.inventory || []);
-            if (estimatesListener) estimatesListener(remoteData.estimates || []);
-            notifyStatus('synced', 'Updated from Cloud');
+            // console.log(`[SYNC] Pulling. Remote(${remoteTimestamp}) > Local(${localTimestamp})`);
+            applyRemoteData(remoteData);
+            notifyStatus('synced', 'Loaded from Cloud');
             
         } else if (localTimestamp > remoteTimestamp) {
              // Local has newer data -> PUSH
-             console.log(`[SYNC] Pushing. Local(${localTimestamp}) > Remote(${remoteTimestamp})`);
-             await pushToCloud(config, inventory, estimates);
+             // console.log(`[SYNC] Pushing. Local(${localTimestamp}) > Remote(${remoteTimestamp})`);
+             await pushToCloud(config);
              notifyStatus('synced', 'Saved to Cloud');
         } else {
              notifyStatus('synced', 'Up to date');
@@ -235,7 +257,7 @@ export const syncData = async () => {
         console.error("Sync failed", error);
         const msg = error instanceof Error ? error.message : "Unknown";
         let displayMsg = msg;
-        if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed";
+        if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed (Check Internet/CORS)";
         notifyStatus('error', displayMsg);
     } finally {
         clearTimeout(spinnerTimeout);
@@ -243,13 +265,24 @@ export const syncData = async () => {
     }
 };
 
-const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], estimates: EstimateRecord[]) => {
+const applyRemoteData = (data: SyncPayload) => {
+    localStorage.setItem(STORAGE_KEY_INVENTORY, JSON.stringify(data.inventory || []));
+    localStorage.setItem(STORAGE_KEY_ESTIMATES, JSON.stringify(data.estimates || []));
+    localStorage.setItem(STORAGE_KEY_LAST_SYNC, (data.timestamp || 0).toString());
+    
+    // Update UI
+    if (inventoryListener) inventoryListener(data.inventory || []);
+    if (estimatesListener) estimatesListener(data.estimates || []);
+};
+
+const pushToCloud = async (config: CloudConfig) => {
+    const inventory = getLocalInventory();
+    const estimates = getLocalEstimates();
     const timestamp = parseInt(localStorage.getItem(STORAGE_KEY_LAST_SYNC) || Date.now().toString());
+    
     const payload: SyncPayload = { inventory, estimates, timestamp };
 
-    // CACHE BUSTING for PUT as well
     const bustCache = `?t=${Date.now()}`;
-    
     const response = await fetch(`${config.workerUrl}${bustCache}`, {
         method: 'PUT',
         headers: { 
@@ -259,17 +292,59 @@ const pushToCloud = async (config: CloudConfig, inventory: InventoryItem[], esti
         body: JSON.stringify(payload)
     });
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+         let text = await response.text();
+         throw new Error(`Save Failed: ${text}`);
+    }
+};
+
+// --- FORCE ACTIONS (Manual Override) ---
+
+export const forceUploadToCloud = async () => {
+    const config = getCloudConfig();
+    if (!config) throw new Error("Not configured");
+    
+    // 1. Update local TS to be absolutely newest
+    touchLocalData();
+    notifyStatus('syncing', 'Force Uploading...');
+    
+    // 2. Push
+    await pushToCloud(config);
+    notifyStatus('synced', 'Force Upload Complete');
+};
+
+export const forceDownloadFromCloud = async () => {
+    const config = getCloudConfig();
+    if (!config) throw new Error("Not configured");
+
+    notifyStatus('syncing', 'Force Downloading...');
+    
+    const bustCache = `?t=${Date.now()}`;
+    const response = await fetch(`${config.workerUrl}${bustCache}`, {
+        method: 'GET',
+        headers: { 
+            'Authorization': config.accessToken,
+            'Cache-Control': 'no-cache'
+        }
+    });
+
+    if (!response.ok) throw new Error("Download Failed");
+    
+    const remoteData: SyncPayload = await response.json();
+    
+    // Force apply regardless of timestamp
+    applyRemoteData(remoteData);
+    notifyStatus('synced', 'Force Download Complete');
 };
 
 // --- Auto Sync Logic ---
 const startAutoSync = () => {
     if (syncIntervalId) clearInterval(syncIntervalId);
-    // ULTRA FAST SYNC: 4 seconds
+    // ULTRA FAST SYNC: 2 seconds for "Real Time" feel
     syncIntervalId = setInterval(() => {
         const config = getCloudConfig();
         if (config?.workerUrl && !isSyncing) syncData();
-    }, 4000);
+    }, 2000);
 };
 
 // --- Public API ---
@@ -441,6 +516,7 @@ export const addPaymentToEstimate = async (targetEstId: string, payment: Payment
     const targetIdx = estimates.findIndex(e => e.id === targetEstId);
     if (targetIdx === -1) return;
 
+    // ... (Payment logic remains same)
     const targetEst = estimates[targetIdx];
     const getCustKey = (c: CustomerProfile) => (c.firmName || c.name || '').toLowerCase().trim() + (c.phone || '').trim();
     const targetCustKey = getCustKey(targetEst.customer);
