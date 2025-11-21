@@ -32,38 +32,62 @@ let isSyncing = false; // Prevent double syncs
 export const CLOUDFLARE_WORKER_CODE = `
 export default {
   async fetch(request, env, ctx) {
+    // CORS Headers - Allow all headers to prevent browser blocking custom headers like Cache-Control
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS, HEAD",
+      "Access-Control-Allow-Headers": "*", 
       "Access-Control-Max-Age": "86400",
     };
 
+    // Handle CORS Preflight - CRITICAL: Return 200 immediately
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 200, headers: corsHeaders });
     }
-
-    if (!env.STORE) {
-      return new Response(
-        JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound. Go to Settings -> Variables." }), 
-        { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader || authHeader.trim().length === 0) {
-      return new Response(
-        JSON.stringify({ error: "Unauthorized: Missing Token" }), 
-        { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
-    const KEY = \`user_\${authHeader.replace(/[^a-zA-Z0-9]/g, '')}\`;
 
     try {
+      const url = new URL(request.url);
+      const authHeader = request.headers.get("Authorization");
+      const hasAuth = authHeader && authHeader.trim().length > 0;
+
+      // HEALTH CHECK: Root path check.
+      // Allows testing the URL in browser (no auth) to see if Worker is up.
+      if ((url.pathname === "/" || url.pathname === "") && !hasAuth) {
+         const kvStatus = env.STORE ? "Connected" : "Missing Binding (Check Settings -> Variables)";
+         return new Response(JSON.stringify({ 
+             status: "Online", 
+             message: "Jirawala Worker is Active", 
+             kv: kvStatus 
+         }), {
+            headers: { "Content-Type": "application/json", ...corsHeaders }
+         });
+      }
+
+      // Check for KV Binding
+      if (!env.STORE) {
+        return new Response(
+          JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound." }), 
+          { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      // Require Authorization for all data operations
+      if (!hasAuth) {
+        return new Response(
+          JSON.stringify({ error: "Unauthorized: Missing Token" }), 
+          { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      // Generate a safe key from the token
+      const KEY = \`user_\${authHeader.replace(/[^a-zA-Z0-9]/g, '')}\`;
+
+      // GET: Download Data
       if (request.method === "GET") {
         const data = await env.STORE.get(KEY);
+        // Default empty payload structure if no data exists
         const payload = data || JSON.stringify({ inventory: [], estimates: [], timestamp: 0 });
+        
         return new Response(payload, {
           headers: { 
             "Content-Type": "application/json",
@@ -73,21 +97,32 @@ export default {
         });
       }
 
+      // PUT: Upload Data
       if (request.method === "PUT") {
         const bodyText = await request.text();
-        try { JSON.parse(bodyText); } catch (e) {
+        
+        try {
+           JSON.parse(bodyText); // Validate JSON
+        } catch (e) {
            return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400, headers: corsHeaders });
         }
+        
         await env.STORE.put(KEY, bodyText);
+        
         return new Response(JSON.stringify({ success: true }), {
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });
       }
       
-      return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+      return new Response(JSON.stringify({ error: "Method not allowed" }), { 
+          status: 405, 
+          headers: { "Content-Type": "application/json", ...corsHeaders } 
+      });
+
     } catch (err) {
+      // Catch-all for any internal errors to ensure CORS headers are still sent
       return new Response(
-        JSON.stringify({ error: err.message }), 
+        JSON.stringify({ error: \`Internal Error: \${err.message}\` }), 
         { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }
@@ -184,53 +219,79 @@ export const syncData = async () => {
         // CACHE BUSTING with timestamp
         const bustCache = `?t=${Date.now()}`;
         const fetchUrl = `${config.workerUrl}${bustCache}`;
-
-        const response = await fetch(fetchUrl, {
-            method: 'GET',
-            headers: { 
-                'Authorization': config.accessToken,
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
-            }
-        });
-
-        const contentType = response.headers.get("content-type");
-        if (contentType && contentType.includes("text/html")) {
-            throw new Error("Incorrect URL: The Worker returned HTML instead of JSON. Check URL.");
-        }
-
-        if (!response.ok) {
-            let text = "Unknown Error";
-            try { text = await response.text(); } catch(e) {}
-            try { 
-                const errObj = JSON.parse(text);
-                if (errObj.error) text = errObj.error;
-            } catch(e) {}
-            throw new Error(text);
-        }
-
-        const remoteData: SyncPayload = await response.json();
-        const remoteTimestamp = remoteData.timestamp || 0;
         
-        if (remoteTimestamp > localTimestamp) {
-            // Cloud is newer -> PULL
-            applyRemoteData(remoteData);
-            notifyStatus('synced', 'Loaded from Cloud');
+        // Validate URL simple check
+        if (!fetchUrl.startsWith("http")) throw new Error("Invalid URL Protocol");
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s Timeout
+
+        try {
+            const response = await fetch(fetchUrl, {
+                method: 'GET',
+                headers: { 
+                    'Authorization': config.accessToken,
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                },
+                signal: controller.signal
+            });
             
-        } else if (localTimestamp > remoteTimestamp) {
-             // Local is newer -> PUSH
-             await pushToCloud(config);
-             notifyStatus('synced', 'Saved to Cloud');
-        } else {
-             notifyStatus('synced', 'Up to date');
+            clearTimeout(timeoutId);
+
+            const contentType = response.headers.get("content-type");
+            if (contentType && contentType.includes("text/html")) {
+                throw new Error("Incorrect URL. Worker returned HTML (Expected JSON).");
+            }
+
+            if (!response.ok) {
+                if (response.status === 401) throw new Error("Unauthorized (Check Token)");
+                if (response.status === 404) throw new Error("Worker 404 (Check URL)");
+                if (response.status === 500) {
+                    // Try to get error text from body
+                    try {
+                        const errBody = await response.json();
+                        if (errBody.error) throw new Error(`Server Error: ${errBody.error}`);
+                    } catch(e) {}
+                    throw new Error("Server Error 500 (Check KV Binding)");
+                }
+                throw new Error(`Server Error ${response.status}`);
+            }
+
+            const remoteData: any = await response.json();
+            
+            // Safety Check: Did we get a Health Check response instead of data?
+            if (remoteData.status === "Online" && remoteData.message && !remoteData.inventory) {
+                 // This happens if the Worker logic for Auth check failed or client didn't send auth
+                 throw new Error("Sync Error: Worker returned Status instead of Data.");
+            }
+
+            const payload = remoteData as SyncPayload;
+            const remoteTimestamp = payload.timestamp || 0;
+            
+            if (remoteTimestamp > localTimestamp) {
+                applyRemoteData(payload);
+                notifyStatus('synced', 'Loaded from Cloud');
+            } else if (localTimestamp > remoteTimestamp) {
+                await pushToCloud(config);
+                notifyStatus('synced', 'Saved to Cloud');
+            } else {
+                notifyStatus('synced', 'Up to date');
+            }
+        } catch (fetchErr: any) {
+            clearTimeout(timeoutId);
+            throw fetchErr;
         }
 
-    } catch (error) {
+    } catch (error: any) {
         console.error("Sync failed", error);
-        const msg = error instanceof Error ? error.message : "Unknown";
-        let displayMsg = msg;
-        if (msg.includes("Failed to fetch")) displayMsg = "Connection Failed (Check Internet/CORS)";
-        notifyStatus('error', displayMsg);
+        let msg = "Sync Failed";
+        if (error.name === 'AbortError') msg = "Connection Timeout";
+        else if (error.message.includes("Failed to fetch")) msg = "Network/CORS Error (Update Worker Code)";
+        else if (error.message.includes("Incorrect URL")) msg = "Bad URL (HTML)";
+        else msg = error.message;
+        
+        notifyStatus('error', msg);
     } finally {
         clearTimeout(spinnerTimeout);
         isSyncing = false;
@@ -264,8 +325,7 @@ const pushToCloud = async (config: CloudConfig) => {
     });
 
     if (!response.ok) {
-         let text = await response.text();
-         throw new Error(`Save Failed: ${text}`);
+         throw new Error(`Save Failed: ${response.status}`);
     }
 };
 
@@ -299,19 +359,23 @@ export const forceDownloadFromCloud = async () => {
 
     if (!response.ok) throw new Error("Download Failed");
     
-    const remoteData: SyncPayload = await response.json();
-    applyRemoteData(remoteData);
+    const remoteData: any = await response.json();
+    if (remoteData.status === "Online" && !remoteData.inventory) {
+         throw new Error("Worker returned Status, not Data");
+    }
+
+    applyRemoteData(remoteData as SyncPayload);
     notifyStatus('synced', 'Force Download Complete');
 };
 
 // --- Auto Sync Logic ---
 const startAutoSync = () => {
     if (syncIntervalId) clearInterval(syncIntervalId);
-    // 3 second interval for balance of speed and performance
+    // 5 second interval
     syncIntervalId = setInterval(() => {
         const config = getCloudConfig();
         if (config?.workerUrl && !isSyncing) syncData();
-    }, 3000);
+    }, 5000);
 };
 
 // --- Public API ---

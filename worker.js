@@ -15,53 +15,60 @@
 
 export default {
   async fetch(request, env, ctx) {
-    // CORS Headers - Allow all origins for the app to work
+    // CORS Headers - Allow all headers to prevent browser blocking custom headers like Cache-Control
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS, HEAD",
+      "Access-Control-Allow-Headers": "*", 
       "Access-Control-Max-Age": "86400",
     };
 
-    // Handle CORS Preflight
+    // Handle CORS Preflight - CRITICAL: Return 200 immediately
     if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+      return new Response(null, { status: 200, headers: corsHeaders });
     }
-
-    // Health Check (Root Path) - Useful to test if URL is correct in browser
-    const url = new URL(request.url);
-    if (url.pathname === "/" || url.pathname === "") {
-       return new Response(JSON.stringify({ status: "Online", message: "Jirawala Worker is Active" }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-       });
-    }
-
-    // Check for KV Binding
-    if (!env.STORE) {
-      return new Response(
-        JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound. Go to Settings -> Variables in Cloudflare Dashboard." }), 
-        { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
-    // Check Authorization
-    const authHeader = request.headers.get("Authorization");
-    if (!authHeader || authHeader.trim().length === 0) {
-      return new Response(
-        JSON.stringify({ error: "Unauthorized: Missing Token" }), 
-        { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
-      );
-    }
-
-    // Generate a safe key from the token
-    // This allows multiple users to use the same worker if they have different keys
-    const KEY = `user_${authHeader.replace(/[^a-zA-Z0-9]/g, '')}`;
 
     try {
+      const url = new URL(request.url);
+      const authHeader = request.headers.get("Authorization");
+      const hasAuth = authHeader && authHeader.trim().length > 0;
+
+      // HEALTH CHECK: Root path check.
+      // Allows testing the URL in browser (no auth) to see if Worker is up.
+      if ((url.pathname === "/" || url.pathname === "") && !hasAuth) {
+         const kvStatus = env.STORE ? "Connected" : "Missing Binding (Check Settings -> Variables)";
+         return new Response(JSON.stringify({ 
+             status: "Online", 
+             message: "Jirawala Worker is Active", 
+             kv: kvStatus 
+         }), {
+            headers: { "Content-Type": "application/json", ...corsHeaders }
+         });
+      }
+
+      // Check for KV Binding
+      if (!env.STORE) {
+        return new Response(
+          JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound." }), 
+          { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      // Require Authorization for all data operations
+      if (!hasAuth) {
+        return new Response(
+          JSON.stringify({ error: "Unauthorized: Missing Token" }), 
+          { status: 401, headers: { "Content-Type": "application/json", ...corsHeaders } }
+        );
+      }
+
+      // Generate a safe key from the token
+      const KEY = `user_${authHeader.replace(/[^a-zA-Z0-9]/g, '')}`;
+
       // GET: Download Data
       if (request.method === "GET") {
         const data = await env.STORE.get(KEY);
-        // Return empty structure if no data exists yet
+        // Default empty payload structure if no data exists
         const payload = data || JSON.stringify({ inventory: [], estimates: [], timestamp: 0 });
         
         return new Response(payload, {
@@ -77,9 +84,8 @@ export default {
       if (request.method === "PUT") {
         const bodyText = await request.text();
         
-        // Validate it's JSON
         try {
-           JSON.parse(bodyText);
+           JSON.parse(bodyText); // Validate JSON
         } catch (e) {
            return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400, headers: corsHeaders });
         }
@@ -91,10 +97,15 @@ export default {
         });
       }
       
-      return new Response("Method not allowed", { status: 405, headers: corsHeaders });
+      return new Response(JSON.stringify({ error: "Method not allowed" }), { 
+          status: 405, 
+          headers: { "Content-Type": "application/json", ...corsHeaders } 
+      });
+
     } catch (err) {
+      // Catch-all for any internal errors to ensure CORS headers are still sent
       return new Response(
-        JSON.stringify({ error: err.message }), 
+        JSON.stringify({ error: `Internal Error: ${err.message}` }), 
         { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }

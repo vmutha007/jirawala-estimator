@@ -354,22 +354,43 @@ function App() {
           addToast("Please enter a Worker URL", 'error');
           return;
       }
+
+      // Validate URL logic
+      let testUrl = cloudUrl.trim().replace(/\/$/, "");
+      if (!testUrl.startsWith("http")) testUrl = "https://" + testUrl;
+      
+      // Prevent using app URL
+      if (window.location.hostname !== 'localhost') {
+          if (testUrl.includes(window.location.hostname)) {
+              addToast("Invalid URL: You entered the App URL, not the Worker URL.", 'error');
+              return;
+          }
+      }
+
       setIsUpdating(true);
       try {
-          // Try a simple GET to the root of the worker
-          let testUrl = cloudUrl.trim().replace(/\/$/, "");
-          if (!testUrl.startsWith("http")) testUrl = "https://" + testUrl;
-          
           const res = await fetch(testUrl);
-          if (res.ok || res.status === 401) {
+          
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.includes("text/html")) {
+              throw new Error("URL returned HTML (Expected JSON). Is this the Frontend URL?");
+          }
+          
+          if (res.ok) {
+              const data = await res.json();
+              addToast(`Success! ${data.message || 'Connected'}`, 'success');
+          } else if (res.status === 401) {
                // 401 is okay, it means we reached the worker but need token
-               addToast("Success! Connected to Worker.", 'success');
+               addToast("Success! Worker reached (401 Expected)", 'success');
           } else {
                throw new Error("Worker reachable but returned error " + res.status);
           }
-      } catch (e) {
+      } catch (e: any) {
           console.error(e);
-          addToast("Connection Failed. Check URL.", 'error');
+          let msg = "Connection Failed";
+          if (e.message.includes("Failed to fetch")) msg = "Network Error (CORS or Offline)";
+          else msg = e.message;
+          addToast(msg, 'error');
       } finally {
           setIsUpdating(false);
       }
