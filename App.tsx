@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Upload, 
@@ -53,7 +54,8 @@ import {
   Layers,
   Loader2,
   ArrowUpCircle,
-  ArrowDownCircle
+  ArrowDownCircle,
+  CloudDownload
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus, PaymentEntry } from './types';
 import { parseInvoiceDocument } from './services/geminiService';
@@ -331,13 +333,13 @@ function App() {
       }
   };
 
-  const handleForceDownload = async () => {
-      if(confirm("OVERWRITE LOCAL DATA? This will replace data on THIS device with data from the Cloud.")) {
+  const handleForceDownload = async (confirmRequired = true) => {
+      if(!confirmRequired || confirm("OVERWRITE LOCAL DATA? This will replace data on THIS device with data from the Cloud.")) {
           try {
               await forceDownloadFromCloud();
-              addToast("Force Download Successful", 'success');
+              addToast("Synced successfully!", 'success');
           } catch(e) {
-              addToast("Force Download Failed", 'error');
+              addToast("Download Failed", 'error');
           }
       }
   };
@@ -1058,7 +1060,7 @@ function App() {
                                    <ArrowUpCircle className="w-4 h-4" /> Force Upload (Overwrite Cloud)
                                </button>
                                <button 
-                                   onClick={handleForceDownload}
+                                   onClick={() => handleForceDownload(true)}
                                    className="flex-1 flex items-center justify-center gap-2 bg-white border border-blue-300 text-blue-700 hover:bg-blue-50 px-3 py-2 rounded text-xs font-medium transition"
                                >
                                    <ArrowDownCircle className="w-4 h-4" /> Force Download (Overwrite Local)
@@ -1360,8 +1362,19 @@ function App() {
 
                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
                          <div>
-                             <h3 className="font-bold text-slate-800 mb-1">Database</h3>
-                             <p className="text-slate-500 text-sm mb-4">{inventory.length} items stored</p>
+                             <div className="flex justify-between items-start">
+                                 <div>
+                                     <h3 className="font-bold text-slate-800 mb-1">Database</h3>
+                                     <p className="text-slate-500 text-sm mb-4">{inventory.length} items stored</p>
+                                 </div>
+                                 <button 
+                                    onClick={() => handleForceDownload(false)} 
+                                    className="text-primary hover:text-blue-700 hover:bg-blue-50 p-1.5 rounded transition"
+                                    title="Force Update from Cloud"
+                                 >
+                                    <CloudDownload className="w-5 h-5" />
+                                 </button>
+                             </div>
                              {selectedInventory.size > 0 && (
                                  <div className="mb-3 p-2 bg-red-50 text-red-700 rounded-lg text-xs font-medium flex items-center justify-between">
                                      <span>{selectedInventory.size} selected</span>
@@ -1456,6 +1469,13 @@ function App() {
                         />
                      </div>
                      <div className="flex items-center gap-3 w-full md:w-auto">
+                        <button 
+                            onClick={() => handleForceDownload(false)}
+                            className="flex items-center gap-2 bg-slate-100 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-sm font-medium transition"
+                        >
+                            <CloudDownload className="w-4 h-4" /> Update Client Data
+                        </button>
+
                         <div className="flex items-center gap-2 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1">
                             <Calendar className="w-4 h-4 text-slate-500" />
                             <input 
