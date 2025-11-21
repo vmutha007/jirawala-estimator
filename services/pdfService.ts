@@ -4,13 +4,16 @@ import autoTable from 'jspdf-autotable';
 import { EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord } from '../types';
 
 // --- THEME CONFIGURATION (Liceria Style) ---
+// Typed as tuples to satisfy jspdf-autotable strict types
+type ColorTuple = [number, number, number];
+
 const THEME = {
-  BG_COLOR: [253, 251, 247], // Light Beige/Cream (#FDFBF7)
-  ACCENT_COLOR: [217, 37, 37], // Bold Red (#D92525)
-  TEXT_MAIN: [26, 26, 26], // Near Black
-  TEXT_SEC: [80, 80, 80], // Dark Gray
-  BORDER_COLOR: [40, 40, 40], // Dark borders for grid
-  TABLE_HEAD_BG: [235, 230, 220], // Darker Beige for headers
+  BG_COLOR: [253, 251, 247] as ColorTuple, // Light Beige/Cream (#FDFBF7)
+  ACCENT_COLOR: [217, 37, 37] as ColorTuple, // Bold Red (#D92525)
+  TEXT_MAIN: [26, 26, 26] as ColorTuple, // Near Black
+  TEXT_SEC: [80, 80, 80] as ColorTuple, // Dark Gray
+  BORDER_COLOR: [40, 40, 40] as ColorTuple, // Dark borders for grid
+  TABLE_HEAD_BG: [235, 230, 220] as ColorTuple, // Darker Beige for headers
 };
 
 const numberToWords = (num: number): string => {
@@ -486,7 +489,7 @@ export const generateStatementPDF = (
             1: { cellWidth: 25 },
             // Description auto
             3: { halign: 'right', textColor: THEME.ACCENT_COLOR, cellWidth: 25 }, // Debit Red
-            4: { halign: 'right', textColor: [22, 163, 74], cellWidth: 25 }, // Credit Green
+            4: { halign: 'right', textColor: [22, 163, 74] as ColorTuple, cellWidth: 25 }, // Credit Green
             5: { halign: 'right', fontStyle: 'bold', cellWidth: 30 }
         }
     });
