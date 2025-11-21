@@ -28,10 +28,18 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
+    // Health Check (Root Path) - Useful to test if URL is correct in browser
+    const url = new URL(request.url);
+    if (url.pathname === "/" || url.pathname === "") {
+       return new Response(JSON.stringify({ status: "Online", message: "Jirawala Worker is Active" }), {
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+       });
+    }
+
     // Check for KV Binding
     if (!env.STORE) {
       return new Response(
-        JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound. Go to Settings -> Variables." }), 
+        JSON.stringify({ error: "Server Config Error: KV Namespace 'STORE' not bound. Go to Settings -> Variables in Cloudflare Dashboard." }), 
         { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } }
       );
     }

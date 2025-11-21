@@ -55,7 +55,8 @@ import {
   Loader2,
   ArrowUpCircle,
   ArrowDownCircle,
-  CloudDownload
+  CloudDownload,
+  PlugZap
 } from 'lucide-react';
 import { InventoryItem, EstimateItem, BusinessProfile, CustomerProfile, EstimateRecord, EstimateStatus, PaymentStatus, PaymentEntry } from './types';
 import { parseInvoiceDocument } from './services/geminiService';
@@ -117,6 +118,7 @@ function App() {
   
   // Action Loading States
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [isUpdating, setIsUpdating] = useState(false);
   
   // Toast State
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -335,12 +337,41 @@ function App() {
 
   const handleForceDownload = async (confirmRequired = true) => {
       if(!confirmRequired || confirm("OVERWRITE LOCAL DATA? This will replace data on THIS device with data from the Cloud.")) {
+          setIsUpdating(true);
           try {
               await forceDownloadFromCloud();
               addToast("Synced successfully!", 'success');
           } catch(e) {
               addToast("Download Failed", 'error');
+          } finally {
+              setIsUpdating(false);
           }
+      }
+  };
+
+  const testConnection = async () => {
+      if (!cloudUrl) {
+          addToast("Please enter a Worker URL", 'error');
+          return;
+      }
+      setIsUpdating(true);
+      try {
+          // Try a simple GET to the root of the worker
+          let testUrl = cloudUrl.trim().replace(/\/$/, "");
+          if (!testUrl.startsWith("http")) testUrl = "https://" + testUrl;
+          
+          const res = await fetch(testUrl);
+          if (res.ok || res.status === 401) {
+               // 401 is okay, it means we reached the worker but need token
+               addToast("Success! Connected to Worker.", 'success');
+          } else {
+               throw new Error("Worker reachable but returned error " + res.status);
+          }
+      } catch (e) {
+          console.error(e);
+          addToast("Connection Failed. Check URL.", 'error');
+      } finally {
+          setIsUpdating(false);
       }
   };
 
@@ -795,7 +826,6 @@ function App() {
 
   // --- Clients Logic ---
   const getUniqueKey = (c: CustomerProfile) => `${c.name}||${c.firmName}`;
-  // Explicitly typing string[] to avoid 'unknown' type inference issues on 'key' usage later
   const uniqueClientKeys: string[] = Array.from(new Set(estimates.map(e => getUniqueKey(e.customer)))).sort();
   
   const clientSuggestions = customerDetails.name ? estimates.filter(e => {
@@ -1046,6 +1076,18 @@ function App() {
                                />
                            </div>
                        </div>
+                       {cloudUrl && (
+                           <div className="md:col-span-2 flex justify-end">
+                               <button 
+                                    onClick={testConnection}
+                                    disabled={isUpdating}
+                                    className="flex items-center gap-2 bg-blue-100 hover:bg-blue-200 text-blue-800 px-4 py-2 rounded-lg text-sm font-bold transition disabled:opacity-50"
+                               >
+                                    {isUpdating ? <Loader2 className="w-4 h-4 animate-spin"/> : <PlugZap className="w-4 h-4"/>}
+                                    Test Connection
+                               </button>
+                           </div>
+                       )}
                    </div>
                    
                    {/* Manual Sync Controls */}
@@ -1362,19 +1404,23 @@ function App() {
 
                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
                          <div>
-                             <div className="flex justify-between items-start">
+                             <div className="flex justify-between items-start mb-3">
                                  <div>
                                      <h3 className="font-bold text-slate-800 mb-1">Database</h3>
-                                     <p className="text-slate-500 text-sm mb-4">{inventory.length} items stored</p>
+                                     <p className="text-slate-500 text-sm">{inventory.length} items stored</p>
                                  </div>
-                                 <button 
-                                    onClick={() => handleForceDownload(false)} 
-                                    className="text-primary hover:text-blue-700 hover:bg-blue-50 p-1.5 rounded transition"
-                                    title="Force Update from Cloud"
-                                 >
-                                    <CloudDownload className="w-5 h-5" />
-                                 </button>
                              </div>
+                             
+                             <button 
+                                onClick={() => handleForceDownload(false)} 
+                                disabled={isUpdating}
+                                className="w-full mb-3 flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-medium transition disabled:opacity-50"
+                                title="Force Update from Cloud"
+                             >
+                                {isUpdating ? <Loader2 className="w-4 h-4 animate-spin" /> : <CloudDownload className="w-4 h-4" />} 
+                                {isUpdating ? 'Updating...' : 'Update from Cloud'}
+                             </button>
+
                              {selectedInventory.size > 0 && (
                                  <div className="mb-3 p-2 bg-red-50 text-red-700 rounded-lg text-xs font-medium flex items-center justify-between">
                                      <span>{selectedInventory.size} selected</span>
@@ -1471,9 +1517,11 @@ function App() {
                      <div className="flex items-center gap-3 w-full md:w-auto">
                         <button 
                             onClick={() => handleForceDownload(false)}
-                            className="flex items-center gap-2 bg-slate-100 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-sm font-medium transition"
+                            disabled={isUpdating}
+                            className="flex items-center gap-2 bg-slate-100 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-sm font-medium transition disabled:opacity-50"
                         >
-                            <CloudDownload className="w-4 h-4" /> Update Client Data
+                            {isUpdating ? <Loader2 className="w-4 h-4 animate-spin"/> : <CloudDownload className="w-4 h-4" />} 
+                            {isUpdating ? 'Updating...' : 'Update Client Data'}
                         </button>
 
                         <div className="flex items-center gap-2 bg-slate-50 border border-slate-300 rounded-lg px-2 py-1">
